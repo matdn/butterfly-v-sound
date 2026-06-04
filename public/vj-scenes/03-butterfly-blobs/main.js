@@ -14,11 +14,11 @@ const BACKGROUND_COLORS = [ '#06060a', '#06060a', '#061a0a', '#160824' ]   // no
 
 // Scripted track — stages advance when kick count reaches kicksToNext
 const TRACK = [
-	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 3 },   // 0 – intro blanc
-	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 4 },   // 1 – ciel
-	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal',   kicksToNext: 4 },   // 2 – réseau
-	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 3 },   // 3 – tornade
-	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal'  },                    // 4 – réseau final
+	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 5 },                    // 0 – intro blanc
+	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 6 },                    // 1 – ciel (3 mots + buffer)
+	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal',   kicksToNext: 6 },                    // 2 – réseau
+	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 10, textAfterKick: 5 },  // 3 – tornade (2×) : papillon puis texte
+	{ mode: 'chaos',  bgType: 'color',  blendMode: 'normal',  heavy: true },                         // 4 – chaos final maxi
 ]
 
 class ButterflyBlobsScene {
@@ -35,10 +35,11 @@ class ButterflyBlobsScene {
 		this._three = null   // Three.js background renderer
 
 		// track / stage state
-		this._trackStage    = 0
-		this._kickCount     = 0
-		this._lastKickTime  = -999   // cooldown between counted kicks
-		this._skyWordIdx    = 0      // mot actuellement affiché en stage sky
+		this._trackStage      = 0
+		this._kickCount       = 0
+		this._lastKickTime    = -999   // cooldown between counted kicks
+		this._skyWordIdx      = 0      // mot affiché en stage sky
+		this._tornadoWordIdx  = 0      // mot affiché en phase texte du stage tornado
 
 
 		// visual params (editable - no GUI in VJ mode)
@@ -206,14 +207,37 @@ class ButterflyBlobsScene {
 	_advanceStage() {
 		const next = this._trackStage + 1
 		if ( next >= TRACK.length ) return
-		this._trackStage = next
-		this._kickCount  = 0
-		this._skyWordIdx = 0
+		this._trackStage     = next
+		this._kickCount      = 0
+		this._skyWordIdx     = 0
+		this._tornadoWordIdx = 0
 		const stage      = TRACK[ this._trackStage ]
 		this.params.mode = stage.mode
 
 		if ( stage.mode === 'mono'  ) { this.params.contraste = 14; this.params.flou = 8 }
-		if ( stage.mode === 'chaos' ) { this.params.contraste = 1;  this.params.flou = 0 }
+		if ( stage.mode === 'chaos' ) {
+			this.params.contraste = 1
+			this.params.flou = 0
+			// reset canvas et trail pour un départ propre
+			if ( this.canvas ) this.ctx.clearRect( 0, 0, this.canvas.width, this.canvas.height )
+			this._lorenz.trail = []
+			// Pré-remplir la trail pour que la forme apparaisse immédiatement dessinée
+			if ( stage.heavy && this.canvas ) {
+				const l   = this._lorenz
+				const cw  = this.canvas.width
+				const ch  = this.canvas.height
+				const max = l.maxTrail
+				for ( let s = 0; s < max; s++ ) {
+					const { x, y, z } = l
+					l.x += 10 * ( y - x ) * 0.005
+					l.y += ( x * ( 28 - z ) - y ) * 0.005
+					l.z += ( x * y - ( 8 / 3 ) * z ) * 0.005
+					const sx = ( l.x / 35 * 1.2 + 0.5 ) * cw
+					const sy = ( 1 - ( l.z - 2 ) / 58 ) * ch
+					l.trail.push( [ sx, sy ] )
+				}
+			}
+		}
 
 		// mix-blend-mode du canvas sur le bg Three.js
 		this.wrap.style.mixBlendMode = ( stage.bgType === 'sky' ) ? 'multiply' : ''
@@ -242,7 +266,7 @@ class ButterflyBlobsScene {
 		img.onload = () => {
 			const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
 			const aspect  = img.naturalWidth / ( img.naturalHeight || 1 )
-			const w = isHeavy ? ( 120 + Math.random() * 120 ) : ( 22 + Math.random() * 28 )
+			const w = isHeavy ? ( 55 + Math.random() * 55 ) : ( 22 + Math.random() * 28 )
 			const h = w / aspect
 			wall.active.push( {
 				img,
@@ -326,8 +350,9 @@ class ButterflyBlobsScene {
 	}
 
 	_updateFilter( dynContraste ) {
-		// stage sky : texte en mix-blend-mode, pas de filtre CSS
-		if ( TRACK[ this._trackStage ]?.bgType === 'sky' ) {
+		const bgType = TRACK[ this._trackStage ]?.bgType
+		// sky ou tornado phase texte : filtre CSS désactivé pour un texte net
+		if ( bgType === 'sky' || ( bgType === 'tornado' && this._tornadoWordIdx > 0 ) ) {
 			this.wrap.style.filter = 'none'
 			return
 		}
@@ -520,6 +545,42 @@ class ButterflyBlobsScene {
 		}
 	}
 
+	_drawTornadoText() {
+		const { canvas, ctx } = this
+		const WORDS = [ 'EVERYTHING', 'REACTS.' ]
+
+		// Fond transparent — la vidéo tornado montre à travers, le texte clair se pose dessus
+		ctx.clearRect( 0, 0, canvas.width, canvas.height )
+
+		ctx.save()
+		ctx.textAlign    = 'left'
+		ctx.textBaseline = 'middle'
+		ctx.fillStyle    = '#f0ece4'
+
+		let size = Math.round( canvas.height * 0.12 )
+		ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+		let gap    = size * 0.32
+		let ws     = WORDS.map( w => ctx.measureText( w ).width )
+		let totalW = ws.reduce( ( a, b ) => a + b, 0 ) + gap * ( WORDS.length - 1 )
+		const maxW = canvas.width * 0.92
+		if ( totalW > maxW ) {
+			const ratio = maxW / totalW
+			size   = Math.round( size * ratio )
+			ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+			gap    = size * 0.32
+			ws     = WORDS.map( w => ctx.measureText( w ).width )
+			totalW = ws.reduce( ( a, b ) => a + b, 0 ) + gap * ( WORDS.length - 1 )
+		}
+
+		let x = ( canvas.width - totalW ) / 2
+		const y = canvas.height / 2
+		for ( let i = 0; i < Math.min( this._tornadoWordIdx, WORDS.length ); i++ ) {
+			ctx.fillText( WORDS[ i ], x, y )
+			x += ws[ i ] + gap
+		}
+		ctx.restore()
+	}
+
 	_drawSkyText() {
 		const { canvas, ctx } = this
 		const WORDS = [ 'NOTHING', 'IS', 'ISOLATED.' ]
@@ -569,47 +630,82 @@ class ButterflyBlobsScene {
 		const dpr     = Math.min( devicePixelRatio, 2 )
 		const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
 
-		// clear canvas every frame — bgEl (color or video) shows through
-		ctx.clearRect( 0, 0, canvas.width, canvas.height )
-
-		// ── Intégration des équations de Lorenz (plusieurs pas par frame) ─────
+		// ── Intégration Lorenz (à chaque frame) ───────────────────────────────
 		const σ  = 10, ρ = 28, β = 8 / 3
 		const dt = 0.005 * ( 1 + a.volumeSmooth * 0.8 ) * dynVitesse
-		for ( let s = 0; s < 5; s++ ) {
+		const stepsPerFrame = isHeavy ? 20 : 5
+		const trailStart    = l.trail.length
+
+		for ( let s = 0; s < stepsPerFrame; s++ ) {
 			const { x, y, z } = l
 			l.x += σ * ( y - x ) * dt
 			l.y += ( x * ( ρ - z ) - y ) * dt
 			l.z += ( x * y - β * z ) * dt
-			// vue classique papillon : projection (x, z) → écran
-			const sx = ( l.x / 35 * 0.85 + 0.5 ) * canvas.width
-			const sy = ( 1 - ( l.z - 2 ) / 58 ) * canvas.height * 0.88 + canvas.height * 0.06
+			const xScale = isHeavy ? 1.2 : 0.85
+			const sx = ( l.x / 35 * xScale + 0.5 ) * canvas.width
+			const sy = isHeavy
+				? ( 1 - ( l.z - 2 ) / 58 ) * canvas.height
+				: ( 1 - ( l.z - 2 ) / 58 ) * canvas.height * 0.88 + canvas.height * 0.06
 			l.trail.push( [ sx, sy ] )
 		}
 		if ( l.trail.length > l.maxTrail ) l.trail.splice( 0, l.trail.length - l.maxTrail )
 
-		// ── Tracé par buckets d'opacité (18 draw calls au lieu de 4000) ───────
-		const trail   = l.trail
-		const n       = trail.length
-		const BUCKETS = 18
-		if ( n > 2 ) {
-			for ( let b = 0; b < BUCKETS; b++ ) {
-				const i0  = Math.floor( b / BUCKETS * n )
-				const i1  = Math.floor( ( b + 1 ) / BUCKETS * n )
-				if ( i1 <= i0 ) continue
-				const age   = ( b + 1 ) / BUCKETS
-				const alpha = isHeavy ? Math.min( 1, age * age * 1.6 ) : age * age * 0.82
-				const hue   = 28 + age * 28 + ( freqs[ Math.floor( age * 40 ) ] || 0 ) * 18
-				ctx.beginPath()
-				ctx.strokeStyle = `hsla(${hue.toFixed( 0 )}, 85%, ${( 38 + age * 26 ).toFixed( 0 )}%, ${alpha.toFixed( 3 )})`
-				ctx.lineWidth   = isHeavy ? ( 1.5 + age * 7 * kickMult ) : ( 0.4 + age * 1.8 * kickMult )
-				ctx.moveTo( trail[ i0 ][ 0 ], trail[ i0 ][ 1 ] )
-				for ( let i = i0 + 1; i < i1; i++ ) ctx.lineTo( trail[ i ][ 0 ], trail[ i ][ 1 ] )
-				ctx.stroke()
+		if ( isHeavy ) {
+			// ── MODE HEAVY : long-exposure — trail complète redessinée en additif ──
+			// Fondu très léger — empêche la saturation totale mais garde tout visible
+			ctx.globalCompositeOperation = 'source-over'
+			ctx.fillStyle = `rgba(0,0,0,0.016)`
+			ctx.fillRect( 0, 0, canvas.width, canvas.height )
+
+			// Redessine la trail entière en compositing additif
+			// Zones fréquentes = s'accumulent = plus lumineuses
+			ctx.globalCompositeOperation = 'lighter'
+			const trail   = l.trail
+			const n       = trail.length
+			const BUCKETS = 18
+			if ( n > 2 ) {
+				for ( let b = 0; b < BUCKETS; b++ ) {
+					const i0  = Math.floor( b / BUCKETS * n )
+					const i1  = Math.floor( ( b + 1 ) / BUCKETS * n )
+					if ( i1 <= i0 ) continue
+					const age   = ( b + 1 ) / BUCKETS
+					// alpha plus élevé pour un gribouilli plus dense et visible
+					const alpha = age * age * ( 0.022 + a.volumeSmooth * 0.014 + a.kick * 0.04 )
+					ctx.beginPath()
+					ctx.strokeStyle = `rgba(255,255,255,${Math.min( 1, alpha ).toFixed( 4 )})`
+					ctx.lineWidth   = ( 0.7 + age * 3.5 ) * kickMult
+					ctx.moveTo( trail[ i0 ][ 0 ], trail[ i0 ][ 1 ] )
+					for ( let i = i0 + 1; i < i1; i++ ) ctx.lineTo( trail[ i ][ 0 ], trail[ i ][ 1 ] )
+					ctx.stroke()
+				}
+			}
+			ctx.globalCompositeOperation = 'source-over'
+		} else {
+			// ── MODE NORMAL : snapshot de toute la trail en 18 buckets ───────────
+			ctx.clearRect( 0, 0, canvas.width, canvas.height )
+			const trail   = l.trail
+			const n       = trail.length
+			const BUCKETS = 18
+			if ( n > 2 ) {
+				for ( let b = 0; b < BUCKETS; b++ ) {
+					const i0  = Math.floor( b / BUCKETS * n )
+					const i1  = Math.floor( ( b + 1 ) / BUCKETS * n )
+					if ( i1 <= i0 ) continue
+					const age   = ( b + 1 ) / BUCKETS
+					const alpha = age * age * 0.82
+					const hue   = 28 + age * 28 + ( freqs[ Math.floor( age * 40 ) ] || 0 ) * 18
+					ctx.beginPath()
+					ctx.strokeStyle = `hsla(${hue.toFixed( 0 )}, 85%, ${( 38 + age * 26 ).toFixed( 0 )}%, ${alpha.toFixed( 3 )})`
+					ctx.lineWidth   = 0.4 + age * 1.8 * kickMult
+					ctx.moveTo( trail[ i0 ][ 0 ], trail[ i0 ][ 1 ] )
+					for ( let i = i0 + 1; i < i1; i++ ) ctx.lineTo( trail[ i ][ 0 ], trail[ i ][ 1 ] )
+					ctx.stroke()
+				}
 			}
 		}
 
 		// ── Pop image sur chaque kick ─────────────────────────────────────────
-		if ( a.kick > 0.3 && this.t - wall.lastPop > ( isHeavy ? 0.4 : 1.5 ) ) {
+		if ( a.kick > 0.3 && this.t - wall.lastPop > ( isHeavy ? 2 : 4 ) ) {
 			wall.lastPop = this.t
 			const burst = isHeavy
 				? ( a.kickHard > 0.35 ? 14 : 8 )
@@ -642,10 +738,20 @@ class ButterflyBlobsScene {
 
 		// ── track stage advancement — count significant kicks ────────────────
 		if ( a.kick > 0.4 && this.t - this._lastKickTime > 10 ) {
-			this._lastKickTime = this.t			// sky stage : chaque kick révèle le mot suivant
-			if ( TRACK[ this._trackStage ]?.bgType === 'sky' ) {
+			this._lastKickTime = this.t
+			const bgType = TRACK[ this._trackStage ]?.bgType
+			// sky : chaque kick révèle le mot suivant
+			if ( bgType === 'sky' ) {
 				this._skyWordIdx = Math.min( this._skyWordIdx + 1, 3 )
-			}			this._kickCount++
+			}
+			// tornado : après textAfterKick kicks, révèle les mots de la 2e phase
+			if ( bgType === 'tornado' ) {
+				const { textAfterKick } = TRACK[ this._trackStage ]
+				if ( textAfterKick && this._kickCount >= textAfterKick ) {
+					this._tornadoWordIdx = Math.min( this._tornadoWordIdx + 1, 2 )
+				}
+			}
+			this._kickCount++
 			const stage = TRACK[ this._trackStage ]
 			if ( stage.kicksToNext && this._kickCount >= stage.kicksToNext ) {
 				this._advanceStage()
@@ -686,6 +792,8 @@ class ButterflyBlobsScene {
 			const bgType = TRACK[ this._trackStage ]?.bgType
 			if ( bgType === 'sky' ) {
 				this._drawSkyText()
+			} else if ( bgType === 'tornado' && this._tornadoWordIdx > 0 ) {
+				this._drawTornadoText()
 			} else {
 				if ( bgType === 'tornado' ) {
 					ctx.clearRect( 0, 0, canvas.width, canvas.height )
