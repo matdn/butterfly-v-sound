@@ -47,7 +47,7 @@ function vjScenesPlugin() {
 
 	const scan = () => existsSync( dir )
 		? readdirSync( dir, { withFileTypes: true } )
-			.filter( ( d ) => d.isDirectory() && existsSync( resolve( dir, d.name, 'index.html' ) ) )
+			.filter( ( d ) => d.isDirectory() && ! d.name.startsWith( '_' ) && existsSync( resolve( dir, d.name, 'index.html' ) ) )
 			.map( ( d ) => ( { id: d.name, url: `/vj-scenes/${ d.name }/index.html`, kind: 'local' } ) )
 			.sort( ( a, b ) => a.id.localeCompare( b.id ) )
 		: []
