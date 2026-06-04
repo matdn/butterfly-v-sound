@@ -1,6 +1,57 @@
 import Analyzer from '/sounds/Analyzer.js'
 import * as THREE from 'three'
 
+// ── Wriggle shader — butterfly PNG avec displacement GLSL réactif au beat ────
+const WRIGGLE_VERT = `
+uniform float uTime;
+uniform float uKick;
+uniform float uVolume;
+varying vec2 vUv;
+void main() {
+	vUv = uv;
+	vec3 p = position;
+	float wing = smoothstep( 0.15, 1.0, abs( uv.x - 0.5 ) * 2.0 );
+	float kickSoft = smoothstep( 0.0, 1.0, uKick );
+	float beat = 0.65 + kickSoft * 0.45 + uVolume * 0.30;
+	float flapPhase = 0.5 + 0.5 * sin( uTime * 0.78 );
+	float flapCurve = flapPhase * flapPhase * ( 3.0 - 2.0 * flapPhase );
+	float flap = ( flapCurve * 2.0 - 1.0 ) * beat;
+	// Wing tips go far on Z, and fold slightly toward center.
+	p.z += sign( uv.x - 0.5 ) * wing * flap * 0.95;
+	p.x *= 1.0 - wing * abs( flap ) * 0.36;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4( p, 1.0 );
+}`
+
+const WRIGGLE_FRAG = `
+uniform sampler2D uTex;
+uniform float     uTime;
+uniform float     uKick;
+uniform float     uVolume;
+varying vec2 vUv;
+void main() {
+	vec4 base = texture2D( uTex, vUv );
+	float edge = 1.0 - smoothstep( 0.12, 0.95, base.a );
+	float amp  = ( 0.0014 + uKick * 0.006 + uVolume * 0.0024 ) * edge;
+	vec2  disp = vec2(
+		sin( vUv.y * 9.42 + uTime * 2.1 ) * amp,
+		cos( vUv.x * 7.54 + uTime * 1.7 ) * amp
+	);
+	vec2  blobDisp = vec2(
+		sin( ( vUv.y + vUv.x ) * 6.0 + uTime * 1.4 ),
+		cos( ( vUv.x - vUv.y ) * 5.0 - uTime * 1.1 )
+	) * ( 0.0042 + uKick * 0.010 ) * edge;
+	vec4 tex = texture2D( uTex, clamp( vUv + disp, 0.001, 0.999 ) );
+	vec4 blob = texture2D( uTex, clamp( vUv + blobDisp, 0.001, 0.999 ) );
+	float morph = 0.35 + uKick * 0.30 + uVolume * 0.20;
+	vec4 mixTex = mix( tex, blob, morph );
+	float field = sin( vUv.x * 12.0 + uTime * 1.2 ) * cos( vUv.y * 10.0 - uTime * 1.0 );
+	float wobble = ( 0.06 + uKick * 0.10 + uVolume * 0.05 ) * edge;
+	float alpha = smoothstep( 0.05, 0.95, mixTex.a + field * wobble );
+	vec3 bg  = vec3( 0.957, 0.957, 0.941 );
+	vec3 fg  = vec3( 0.110, 0.110, 0.133 );
+	gl_FragColor = vec4( mix( bg, fg, alpha ), 1.0 );
+}`
+
 const PALETTE = [
 	'#E9D3FB', '#BEB8EA', '#BAC2D7', '#B09C69',
 	'#AA3F3D', '#683D73', '#75A8BD', '#60A779',
@@ -12,10 +63,50 @@ const PALETTE = [
 const MODES = [ 'mono', /*'couleur',*/ 'réseau', 'chaos' ]
 const BACKGROUND_COLORS = [ '#06060a', '#06060a', '#061a0a', '#160824' ]   // noir, noir, vert, violet
 
+const LOCAL_BUTTERFLY_POOL = [
+	'/images butterfly /1-214-768x607.jpg',
+	'/images butterfly /1-216.jpg',
+	'/images butterfly /1459932321189150742.jpg',
+	'/images butterfly /1750233373-4253-large.webp',
+	'/images butterfly /347163849140672.webp',
+	'/images butterfly /909023506058977588.jpeg',
+	'/images butterfly /A.jpeg',
+	'/images butterfly /dancing in the street.jpeg',
+	'/images butterfly /Durango, Colorado.jpeg',
+	'/images butterfly /image 79.png',
+	'/images butterfly /images.jpeg',
+	'/images butterfly /images (1).jpeg',
+	'/images butterfly /images (2).jpeg',
+	'/images butterfly /Inde.jpeg',
+	'/images butterfly /Pollution.jpeg',
+	'/images butterfly /quiet.jpeg',
+	'/images butterfly /shannon lynch.jpeg',
+	'/images butterfly /steve mccurry.jpeg',
+	'/images butterfly /Tibet.jpeg',
+	'/images butterfly /Valentina Tereshkova.jpeg',
+	// '/images butterfly /(1).jpeg',
+	// '/images butterfly /(2).jpeg',
+	// '/images butterfly /(3).jpeg',
+	// '/images butterfly /(4).jpeg',
+	// '/images butterfly /(5).jpeg',
+	// '/images butterfly /(6).jpeg',
+	// '/images butterfly /(7).jpeg',
+	// '/images butterfly /(8).jpeg',
+	// '/images butterfly /(9).jpeg',
+	// '/images butterfly /(10).jpeg',
+	// '/images butterfly /(11).jpeg',
+	// '/images butterfly /(12).jpeg',
+	// '/images butterfly /(13).jpeg',
+	// '/images butterfly /(14).jpeg',
+	// '/images butterfly /(15).jpeg',
+	// '/images butterfly /(16).jpeg',
+
+]
+
 // Scripted track — stages advance when kick count reaches kicksToNext
 const TRACK = [
 	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 5 },                    // 0 – intro blanc
-	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 6 },                    // 1 – ciel (3 mots + buffer)
+	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 7 },                    // 1 – ciel (3 mots + buffer)
 	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal',   kicksToNext: 6 },                    // 2 – réseau
 	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 10, textAfterKick: 5 },  // 3 – tornade (2×) : papillon puis texte
 	{ mode: 'chaos',  bgType: 'color',  blendMode: 'normal',  heavy: true },                         // 4 – chaos final maxi
@@ -40,10 +131,11 @@ class ButterflyBlobsScene {
 		this._lastKickTime    = -999   // cooldown between counted kicks
 		this._skyWordIdx      = 0      // mot affiché en stage sky
 		this._tornadoWordIdx  = 0      // mot affiché en phase texte du stage tornado
+		this._scribble        = { x: 0, y: 0, angle: 0, angVel: 0 }  // gribouillis mode heavy
 
 
 		// visual params (editable - no GUI in VJ mode)
-		this.params = {
+	this.params = {
 			blobs:     350,
 			taille:    1,
 			vitesse:   0.6,
@@ -63,6 +155,7 @@ class ButterflyBlobsScene {
 		this.imgW        = 400
 		this.imgH        = 360
 		this.imgData     = null
+		this._vectorImg  = null   // HTMLImageElement conservé pour Three.js texture
 
 		// Lorenz attractor state — persists across mode switches
 		this._lorenz = {
@@ -106,7 +199,8 @@ class ButterflyBlobsScene {
 				off.height   = this.imgH
 				const offCtx = off.getContext( '2d' )
 				offCtx.drawImage( img, 0, 0 )
-				this.imgData = offCtx.getImageData( 0, 0, this.imgW, this.imgH ).data
+				this.imgData    = offCtx.getImageData( 0, 0, this.imgW, this.imgH ).data
+				this._vectorImg = img   // conservé pour créer la texture Three.js dans init()
 				resolve()
 			}
 			img.onerror = resolve   // graceful fallback - blobs will be skipped
@@ -114,14 +208,9 @@ class ButterflyBlobsScene {
 	}
 
 	async _fetchArtworkPool() {
-		try {
-			const r        = await fetch( 'https://api.artic.edu/api/v1/artworks/search?q=butterfly&fields=id,image_id&limit=100', { signal: AbortSignal.timeout( 8000 ) } )
-			const { data } = await r.json()
-			this._chaosWall.pool = data
-				.filter( d => d.image_id )
-				.map( d => `https://www.artic.edu/iiif/2/${d.image_id}/full/400,/0/default.jpg` )
-				.sort( () => Math.random() - 0.5 )
-		} catch { /* offline or timeout */ }
+		this._chaosWall.pool = LOCAL_BUTTERFLY_POOL
+			.map( ( p ) => encodeURI( p ) )
+			.sort( () => Math.random() - 0.5 )
 	}
 
 	_loadImageFromPool( urls, fit = 'cover' ) {
@@ -140,7 +229,8 @@ class ButterflyBlobsScene {
 					tex.offset.set( 0, 0 )
 					const scaleX = vpAspect > imgAspect ? imgAspect / vpAspect : 1
 					const scaleY = vpAspect > imgAspect ? 1 : vpAspect / imgAspect
-					this._three.mesh.scale.set( scaleX, scaleY, 1 )
+					const containZoom = 1.012
+					this._three.mesh.scale.set( scaleX * containZoom, scaleY * containZoom, 1 )
 					// fond blanc hors image (multiply : blanc × canvas = canvas passe à travers)
 					this._three.scene.background = new THREE.Color( 0xffffff )
 				} else {
@@ -157,6 +247,7 @@ class ButterflyBlobsScene {
 				}
 				if ( this._three.imageTexture ) this._three.imageTexture.dispose()
 				this._three.imageTexture      = tex
+				this._three.mesh.material     = this._three.material   // sort du mode wriggle si actif
 				this._three.material.map      = tex
 				this._three.material.color.set( 0xffffff )
 				this._three.material.needsUpdate = true
@@ -168,6 +259,7 @@ class ButterflyBlobsScene {
 
 	_playVideo( url ) {
 		const { video, material } = this._three
+		this._three.mesh.material = material   // sort du mode wriggle si actif
 		video.src = url
 		video.play().catch( () => this._switchToColor() )
 		if ( this._three.videoTexture ) this._three.videoTexture.dispose()
@@ -180,7 +272,8 @@ class ButterflyBlobsScene {
 	}
 
 	_switchToColor() {
-		const { video, material } = this._three
+		const { video, material, mesh } = this._three
+		mesh.material = material   // sort du mode wriggle si actif
 		video.pause()
 		video.src = ''
 		if ( this._three.videoTexture ) {
@@ -204,6 +297,19 @@ class ButterflyBlobsScene {
 		this._switchToColor()
 	}
 
+	_activateWriggle() {
+		const three = this._three
+		if ( ! three?.wriggleMaterial?.uniforms.uTex.value ) return
+		const imgAspect = this.imgW / ( this.imgH || 1 )
+		const vpAspect  = innerWidth / innerHeight
+		const fitX      = vpAspect > imgAspect ? imgAspect / vpAspect : 1
+		const fitY      = vpAspect > imgAspect ? 1 : vpAspect / imgAspect
+		const shrink    = 0.462
+		three.mesh.scale.set( fitX * shrink, fitY * shrink, 1 )
+		three.scene.background = new THREE.Color( 0xf4f4f0 )
+		three.mesh.material = three.wriggleMaterial
+	}
+
 	_advanceStage() {
 		const next = this._trackStage + 1
 		if ( next >= TRACK.length ) return
@@ -218,29 +324,23 @@ class ButterflyBlobsScene {
 		if ( stage.mode === 'chaos' ) {
 			this.params.contraste = 1
 			this.params.flou = 0
-			// reset canvas et trail pour un départ propre
+			// reset canvas pour un départ propre
 			if ( this.canvas ) this.ctx.clearRect( 0, 0, this.canvas.width, this.canvas.height )
 			this._lorenz.trail = []
-			// Pré-remplir la trail pour que la forme apparaisse immédiatement dessinée
+			// Initialise la particule du gribouillis au centre
 			if ( stage.heavy && this.canvas ) {
-				const l   = this._lorenz
-				const cw  = this.canvas.width
-				const ch  = this.canvas.height
-				const max = l.maxTrail
-				for ( let s = 0; s < max; s++ ) {
-					const { x, y, z } = l
-					l.x += 10 * ( y - x ) * 0.005
-					l.y += ( x * ( 28 - z ) - y ) * 0.005
-					l.z += ( x * y - ( 8 / 3 ) * z ) * 0.005
-					const sx = ( l.x / 35 * 1.2 + 0.5 ) * cw
-					const sy = ( 1 - ( l.z - 2 ) / 58 ) * ch
-					l.trail.push( [ sx, sy ] )
+				const cw = this.canvas.width
+				const ch = this.canvas.height
+				this._scribble = {
+					x:      cw / 2 + ( Math.random() - 0.5 ) * cw * 0.4,
+					y:      ch / 2 + ( Math.random() - 0.5 ) * ch * 0.4,
+					angle:  Math.random() * Math.PI * 2,
+					angVel: ( Math.random() - 0.5 ) * 0.1,
 				}
 			}
 		}
 
-		// mix-blend-mode du canvas sur le bg Three.js
-		this.wrap.style.mixBlendMode = ( stage.bgType === 'sky' ) ? 'multiply' : ''
+		// mix-blend-mode géré dynamiquement dans _updateFilter selon la phase
 
 		// fallback color index before potentially playing video (in case video fails)
 		if      ( stage.bgType === 'white'   ) this._bg.colorIdx = 1
@@ -248,7 +348,8 @@ class ButterflyBlobsScene {
 		else if ( stage.bgType === 'tornado' ) this._bg.colorIdx = 0
 		else if ( stage.bgType === 'color'   ) this._bg.colorIdx = 0
 
-		if      ( stage.bgType === 'sky'     ) this._loadImageFromPool( [ '/girlButterfly.png' ], 'contain' )
+		if      ( stage.bgType === 'white'   ) this._activateWriggle()
+		else if ( stage.bgType === 'sky'     ) this._loadImageFromPool( [ '/girlButterfly.png' ], 'contain' )
 		else if ( stage.bgType === 'tornado' ) this._playVideo( '/tornado.mp4' )
 		else                                    this._switchToColor()
 
@@ -290,8 +391,8 @@ class ButterflyBlobsScene {
 		document.body.appendChild( renderer.domElement )
 
 		const scene    = new THREE.Scene()
-		const camera   = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 )
-		const geo      = new THREE.PlaneGeometry( 2, 2 )
+		const camera   = new THREE.OrthographicCamera( -1, 1, 1, -1, -4, 4 )
+		const geo      = new THREE.PlaneGeometry( 2, 2, 120, 80 )
 		const material = new THREE.MeshBasicMaterial( { color: 0x06060a } )
 		const mesh     = new THREE.Mesh( geo, material )
 		scene.add( mesh )
@@ -302,7 +403,29 @@ class ButterflyBlobsScene {
 		video.setAttribute( 'playsinline', '' )
 
 		this._three = { renderer, scene, camera, mesh, material, imageTexture: null, video, videoTexture: null }
+
+		// ── Wriggle ShaderMaterial — butterfly PNG + displacement GLSL ───────────────
+		const wriggleMat = new THREE.ShaderMaterial( {
+			uniforms: {
+				uTex:    { value: null },
+				uTime:   { value: 0 },
+				uKick:   { value: 0 },
+				uVolume: { value: 0 },
+			},
+			vertexShader:   WRIGGLE_VERT,
+			fragmentShader: WRIGGLE_FRAG,
+		} )
+		if ( this._vectorImg ) {
+			const wTex = new THREE.Texture( this._vectorImg )
+			wTex.colorSpace  = THREE.SRGBColorSpace
+			wTex.needsUpdate = true
+			wriggleMat.uniforms.uTex.value = wTex
+			this._three.wriggleTex = wTex
+		}
+		this._three.wriggleMaterial = wriggleMat
+
 		this._applyBgColor()
+		if ( TRACK[ this._trackStage ]?.bgType === 'white' ) this._activateWriggle()
 
 		// ── Canvas 2-D pour le rendu metaball (par-dessus le bg Three.js) ─────
 		this.wrap = document.createElement( 'div' )
@@ -347,15 +470,41 @@ class ButterflyBlobsScene {
 		this.canvas.height = ( innerHeight + bleed * 2 ) * dpr
 		this.canvas.style.cssText = `display:block;position:absolute;left:${-bleed}px;top:${-bleed}px;width:${innerWidth + bleed * 2}px;height:${innerHeight + bleed * 2}px;`
 		if ( this._three ) this._three.renderer.setSize( innerWidth, innerHeight )
+		if ( this._three?.mesh?.material === this._three?.wriggleMaterial ) this._activateWriggle()
 	}
 
 	_updateFilter( dynContraste ) {
-		const bgType = TRACK[ this._trackStage ]?.bgType
-		// sky ou tornado phase texte : filtre CSS désactivé pour un texte net
-		if ( bgType === 'sky' || ( bgType === 'tornado' && this._tornadoWordIdx > 0 ) ) {
-			this.wrap.style.filter = 'none'
+		const bgType       = TRACK[ this._trackStage ]?.bgType
+		const tornadoText  = bgType === 'tornado' && this._tornadoWordIdx > 0
+		const skyText      = bgType === 'sky'     && this._skyWordIdx     > 0
+		const useWriggle   = this.params.mode === 'mono' && bgType !== 'sky' && bgType !== 'tornado' && !tornadoText
+
+		// phases texte : mix-blend-mode difference + pas de filtre blur/contrast
+		if ( skyText || tornadoText ) {
+			this.wrap.style.mixBlendMode = 'difference'
+			this.wrap.style.filter       = 'none'
 			return
 		}
+		// sky avant le premier mot : pas de blend mode, l'image passe à travers le canvas transparent
+		if ( bgType === 'sky' ) {
+			this.wrap.style.mixBlendMode = ''
+			this.wrap.style.filter       = 'none'
+			return
+		}
+		// wriggle : shader Three.js, canvas transparent, pas de filtre
+		if ( useWriggle ) {
+			this.wrap.style.mixBlendMode = ''
+			this.wrap.style.filter       = 'none'
+			return
+		}
+		// tornado (avant texte) : PNG en difference par-dessus la video
+		if ( bgType === 'tornado' && !tornadoText ) {
+			this.wrap.style.mixBlendMode = 'difference'
+			this.wrap.style.filter       = 'none'
+			return
+		}
+		// tous les autres stages
+		this.wrap.style.mixBlendMode = ''
 		const { mode, flou, contraste } = this.params
 		this.wrap.style.filter = ( mode === 'réseau' || mode === 'chaos' )
 			? 'none'
@@ -532,14 +681,11 @@ class ButterflyBlobsScene {
 			const ease     = 1 - Math.pow( 1 - progress, 3 )
 			const w      = im.w * dpr
 			const h      = im.h * dpr
-			const border = Math.max( 6, w * 0.04 )
 			ctx.save()
 			ctx.globalAlpha = ease
 			ctx.translate( im.x * dpr, im.y * dpr )
 			ctx.rotate( im.rot )
 			ctx.scale( 0.4 + 0.6 * ease, 0.4 + 0.6 * ease )
-			ctx.fillStyle = '#f0ece4'
-			ctx.fillRect( -w / 2 - border, -h / 2 - border, w + border * 2, h + border * 2 )
 			ctx.drawImage( im.img, -w / 2, -h / 2, w, h )
 			ctx.restore()
 		}
@@ -585,16 +731,15 @@ class ButterflyBlobsScene {
 		const { canvas, ctx } = this
 		const WORDS = [ 'NOTHING', 'IS', 'ISOLATED.' ]
 
-		// Fond blanc — mix-blend-mode multiply : blanc × img = img, noir × img = assombrit
-		ctx.fillStyle = '#ffffff'
-		ctx.fillRect( 0, 0, canvas.width, canvas.height )
+		// Canvas transparent — l'image butterfly passe normalement, seul le texte se blende en difference
+		ctx.clearRect( 0, 0, canvas.width, canvas.height )
 
 		if ( ! this._skyWordIdx ) return
 
 		ctx.save()
 		ctx.textAlign    = 'left'
 		ctx.textBaseline = 'middle'
-		ctx.fillStyle    = '#0d0d0d'
+		ctx.fillStyle    = '#9C8484'   // blanc : difference sur l'image = couleurs inversées sous le texte
 
 		// Taille auto-fit : part de 12 % hauteur, réduit si la phrase entière dépasse 92 % largeur
 		let size = Math.round( canvas.height * 0.12 )
@@ -622,6 +767,46 @@ class ButterflyBlobsScene {
 		ctx.restore()
 	}
 
+	_drawIntroText() {
+		const { canvas, ctx } = this
+		const lines = [
+			'THE BUTTERFLY EFFECT:',
+			'THE SENSITIVE DEPENDENCE',
+			'ON INITIAL CONDITIONS',
+			'IN WHICH A SMALL',
+			'CHANGE IN ONE STATE',
+			'OF A SYSTEM CAN RESULT IN',
+			'LARGE DIFFERENCES IN A',
+			'LATER STATE.',
+		]
+
+		ctx.save()
+		ctx.textAlign    = 'left'
+		ctx.textBaseline = 'alphabetic'
+		ctx.fillStyle    = 'rgba(0, 0, 0, 0.07)'
+
+		let size = Math.round( canvas.height * 0.095 )
+		ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+		let maxW = 0
+		for ( const line of lines ) maxW = Math.max( maxW, ctx.measureText( line ).width )
+		const targetW = canvas.width * 0.92
+		if ( maxW > targetW ) {
+			const ratio = targetW / maxW
+			size = Math.round( size * ratio )
+			ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+		}
+
+		const lineGap = size * 0.18
+		const blockH  = lines.length * ( size + lineGap )
+		let y = ( canvas.height - blockH ) * 0.52 + size
+		const x = canvas.width * 0.08
+		for ( const line of lines ) {
+			ctx.fillText( line, x, y )
+			y += size + lineGap
+		}
+		ctx.restore()
+	}
+
 	_drawChaos( dynVitesse, kickMult, freqs ) {
 		const { canvas, ctx } = this
 		const a       = this.audio
@@ -630,58 +815,59 @@ class ButterflyBlobsScene {
 		const dpr     = Math.min( devicePixelRatio, 2 )
 		const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
 
-		// ── Intégration Lorenz (à chaque frame) ───────────────────────────────
-		const σ  = 10, ρ = 28, β = 8 / 3
-		const dt = 0.005 * ( 1 + a.volumeSmooth * 0.8 ) * dynVitesse
-		const stepsPerFrame = isHeavy ? 20 : 5
-		const trailStart    = l.trail.length
-
-		for ( let s = 0; s < stepsPerFrame; s++ ) {
-			const { x, y, z } = l
-			l.x += σ * ( y - x ) * dt
-			l.y += ( x * ( ρ - z ) - y ) * dt
-			l.z += ( x * y - β * z ) * dt
-			const xScale = isHeavy ? 1.2 : 0.85
-			const sx = ( l.x / 35 * xScale + 0.5 ) * canvas.width
-			const sy = isHeavy
-				? ( 1 - ( l.z - 2 ) / 58 ) * canvas.height
-				: ( 1 - ( l.z - 2 ) / 58 ) * canvas.height * 0.88 + canvas.height * 0.06
-			l.trail.push( [ sx, sy ] )
-		}
-		if ( l.trail.length > l.maxTrail ) l.trail.splice( 0, l.trail.length - l.maxTrail )
-
 		if ( isHeavy ) {
-			// ── MODE HEAVY : long-exposure — trail complète redessinée en additif ──
-			// Fondu très léger — empêche la saturation totale mais garde tout visible
-			ctx.globalCompositeOperation = 'source-over'
-			ctx.fillStyle = `rgba(0,0,0,0.016)`
+			// ── MODE GRIBOUILLI — particule errante, lignes fines, permanent ───────
+			// Fondu quasi nul — les traits restent indéfiniment
+			ctx.fillStyle = 'rgba(0,0,0,0.001)'
 			ctx.fillRect( 0, 0, canvas.width, canvas.height )
 
-			// Redessine la trail entière en compositing additif
-			// Zones fréquentes = s'accumulent = plus lumineuses
+			const sc  = this._scribble
+			// Vitesse de base très lente, accélère sur les kicks
+			const spd = canvas.width * ( 0.02 + a.volumeSmooth * 0.008 + a.kick * 0.020 )
+			// 2 segments de base, +3 sur les gros kicks
+			const nSteps = 2 + ( a.kick > 0.5 ? 3 : 0 )
+
 			ctx.globalCompositeOperation = 'lighter'
-			const trail   = l.trail
-			const n       = trail.length
-			const BUCKETS = 18
-			if ( n > 2 ) {
-				for ( let b = 0; b < BUCKETS; b++ ) {
-					const i0  = Math.floor( b / BUCKETS * n )
-					const i1  = Math.floor( ( b + 1 ) / BUCKETS * n )
-					if ( i1 <= i0 ) continue
-					const age   = ( b + 1 ) / BUCKETS
-					// alpha plus élevé pour un gribouilli plus dense et visible
-					const alpha = age * age * ( 0.022 + a.volumeSmooth * 0.014 + a.kick * 0.04 )
-					ctx.beginPath()
-					ctx.strokeStyle = `rgba(255,255,255,${Math.min( 1, alpha ).toFixed( 4 )})`
-					ctx.lineWidth   = ( 0.7 + age * 3.5 ) * kickMult
-					ctx.moveTo( trail[ i0 ][ 0 ], trail[ i0 ][ 1 ] )
-					for ( let i = i0 + 1; i < i1; i++ ) ctx.lineTo( trail[ i ][ 0 ], trail[ i ][ 1 ] )
-					ctx.stroke()
-				}
+			ctx.strokeStyle = `rgba(255,255,255,${( 0.22 + a.kick * 0.45 ).toFixed( 3 )})`
+			ctx.lineWidth   = 2.4 + a.kick * 1.6
+			ctx.lineCap     = 'round'
+			ctx.beginPath()
+			ctx.moveTo( sc.x, sc.y )
+
+			for ( let s = 0; s < nSteps; s++ ) {
+				// Marche aléatoire angulaire avec momentum
+				sc.angVel += ( Math.random() - 0.5 ) * 0.18
+				sc.angVel *= 0.91
+				sc.angle  += sc.angVel
+				// Changement de direction brusque occasionnel
+				if ( Math.random() < 0.015 ) sc.angle += ( Math.random() - 0.5 ) * Math.PI * 1.8
+				// Déplacement
+				sc.x += Math.cos( sc.angle ) * spd
+				sc.y += Math.sin( sc.angle ) * spd
+				// Rebond sur les bords
+				if ( sc.x < 0 )             { sc.x = 0;             sc.angle = Math.PI - sc.angle }
+				if ( sc.x > canvas.width  ) { sc.x = canvas.width;  sc.angle = Math.PI - sc.angle }
+				if ( sc.y < 0 )             { sc.y = 0;             sc.angle = -sc.angle }
+				if ( sc.y > canvas.height ) { sc.y = canvas.height; sc.angle = -sc.angle }
+				ctx.lineTo( sc.x, sc.y )
 			}
+			ctx.stroke()
 			ctx.globalCompositeOperation = 'source-over'
+
 		} else {
-			// ── MODE NORMAL : snapshot de toute la trail en 18 buckets ───────────
+			// ── MODE LORENZ NORMAL — attracteur papillon coloré ────────────────
+			const σ  = 10, ρ = 28, β = 8 / 3
+			const dt = 0.005 * ( 1 + a.volumeSmooth * 0.8 ) * dynVitesse
+			for ( let s = 0; s < 5; s++ ) {
+				const { x, y, z } = l
+				l.x += σ * ( y - x ) * dt
+				l.y += ( x * ( ρ - z ) - y ) * dt
+				l.z += ( x * y - β * z ) * dt
+				const sx = ( l.x / 35 * 0.85 + 0.5 ) * canvas.width
+				const sy = ( 1 - ( l.z - 2 ) / 58 ) * canvas.height * 0.88 + canvas.height * 0.06
+				l.trail.push( [ sx, sy ] )
+			}
+			if ( l.trail.length > l.maxTrail ) l.trail.splice( 0, l.trail.length - l.maxTrail )
 			ctx.clearRect( 0, 0, canvas.width, canvas.height )
 			const trail   = l.trail
 			const n       = trail.length
@@ -719,14 +905,11 @@ class ButterflyBlobsScene {
 			const ease     = 1 - Math.pow( 1 - progress, 3 )   // ease-out cubique
 			const w = im.w * dpr
 			const h = im.h * dpr
-			const border = Math.max( 6, w * 0.04 )
 			ctx.save()
 			ctx.globalAlpha = ease
 			ctx.translate( im.x * dpr, im.y * dpr )
 			ctx.rotate( im.rot )
 			ctx.scale( 0.4 + 0.6 * ease, 0.4 + 0.6 * ease )
-			ctx.fillStyle = '#f0ece4'
-			ctx.fillRect( -w / 2 - border, -h / 2 - border, w + border * 2, h + border * 2 )
 			ctx.drawImage( im.img, -w / 2, -h / 2, w, h )
 			ctx.restore()
 		}
@@ -788,37 +971,40 @@ class ButterflyBlobsScene {
 		} else if ( params.mode === 'réseau' ) {
 			this._drawReseau( dynVitesse, kickMult, freqs, dynDisplaySeuil )
 		} else {
-			// mode mono : papillon métaball ou texte selon le stage
+			// mode mono : PNG wriggle ou texte selon le stage
 			const bgType = TRACK[ this._trackStage ]?.bgType
 			if ( bgType === 'sky' ) {
 				this._drawSkyText()
 			} else if ( bgType === 'tornado' && this._tornadoWordIdx > 0 ) {
 				this._drawTornadoText()
+			} else if ( bgType === 'tornado' ) {
+				ctx.clearRect( 0, 0, canvas.width, canvas.height )
+				if ( this._vectorImg ) {
+					const pulse = 1 + a.kick * 0.05 + a.volumeSmooth * 0.03
+					const scale = Math.min( canvas.width * 0.70 / this.imgW, canvas.height * 0.70 / this.imgH ) * pulse
+					const drawW = this.imgW * scale
+					const drawH = this.imgH * scale
+					const x = ( canvas.width - drawW ) / 2
+					const y = ( canvas.height - drawH ) / 2
+					ctx.save()
+					ctx.globalAlpha = 0.98
+					ctx.drawImage( this._vectorImg, x, y, drawW, drawH )
+					// In difference mode, a dark source can vanish; force a white silhouette with original alpha.
+					ctx.globalCompositeOperation = 'source-in'
+					ctx.fillStyle = '#ffffff'
+					ctx.fillRect( x, y, drawW, drawH )
+					ctx.restore()
+				}
 			} else {
-				if ( bgType === 'tornado' ) {
-					ctx.clearRect( 0, 0, canvas.width, canvas.height )
-				} else {
-					ctx.fillStyle = params.mode === 'couleur' ? '#0f0f14' : '#f4f4f0'
-					ctx.fillRect( 0, 0, canvas.width, canvas.height )
+				ctx.clearRect( 0, 0, canvas.width, canvas.height )
+				this._activateWriggle()
+				const m = this._three?.wriggleMaterial
+				if ( m ) {
+					m.uniforms.uTime.value   = this.t
+					m.uniforms.uKick.value   = a.kick
+					m.uniforms.uVolume.value = a.volumeSmooth
 				}
-
-				if ( blobs.length ) {
-					const scale = Math.min( canvas.width * 0.85 / this.imgW, canvas.height * 0.85 / this.imgH )
-					const ox    = ( canvas.width  - this.imgW * scale ) / 2
-					const oy    = ( canvas.height - this.imgH * scale ) / 2
-					const base  = Math.min( canvas.width, canvas.height ) * 0.026 * params.taille
-
-					for ( const b of blobs ) {
-						if ( b.darkness < dynDisplaySeuil ) continue
-						const binIdx    = Math.min( freqs.length - 1, Math.floor( b.normX * freqs.length * 0.8 ) )
-						const freqBoost = 1 + freqs[ binIdx ] * 0.55
-						const pulse = ( 1 + dynPulseAmp * Math.sin( this.t * b.pulseFreq * dynVitesse + b.pulsePhase ) )
-						             * freqBoost * kickMult
-						const x = b.normX * this.imgW * scale + ox
-						const y = b.normY * this.imgH * scale + oy
-						this._drawBlob( x, y, b.baseR * base * pulse, b.darkness, b.color )
-					}
-				}
+				if ( bgType === 'white' && this._trackStage === 0 ) this._drawIntroText()
 			}
 		}
 
