@@ -9,15 +9,15 @@ const PALETTE = [
 ]
 
 const MODES = [ 'mono', /*'couleur',*/ 'réseau', 'chaos' ]
-const BACKGROUND_COLORS = [ '#06060a', '#f0ede4', '#061a0a', '#160824' ]   // noir, crème, vert, violet
+const BACKGROUND_COLORS = [ '#06060a00', '#f0ede400', '#061a0a', '#160824' ]   // noir, crème, vert, violet
 
 // Scripted track — stages advance when kick count reaches kicksToNext
 const TRACK = [
-	{ mode: 'mono',  bgType: 'white',   wrapOpacity: 1.0, kicksToNext: 10 },   // 0 – intro blanc
-	{ mode: 'mono',  bgType: 'sky',     wrapOpacity: 0.7, kicksToNext: 10 },   // 1 – ciel
-	{ mode: 'chaos', bgType: 'color',   wrapOpacity: 1.0, kicksToNext: 12 },   // 2 – chaos
-	{ mode: 'mono',  bgType: 'tornado', wrapOpacity: 0.7, kicksToNext: 10 },   // 3 – tornade
-	{ mode: 'chaos', bgType: 'color',   wrapOpacity: 1.0, heavy: true  },      // 4 – chaos final
+	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 10 },   // 0 – intro blanc
+	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 10 },   // 1 – ciel
+	{ mode: 'chaos', bgType: 'color',   blendMode: 'normal',   kicksToNext: 12 },   // 2 – chaos
+	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 10 },   // 3 – tornade
+	{ mode: 'chaos', bgType: 'color',   blendMode: 'normal',   heavy: true  },      // 4 – chaos final
 ]
 
 class ButterflyBlobsScene {
@@ -122,12 +122,14 @@ class ButterflyBlobsScene {
 	async _fetchSkyVideos() {
 		try {
 			const r = await fetch(
-				'https://archive.org/advancedsearch.php?q=subject%3Asky+subject%3Aclouds+mediatype%3Amovies&fl=identifier&rows=30&output=json',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Time-lapse_videos_of_clouds&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
-			const { response } = await r.json()
-			this._skyVideos = ( response?.docs || [] )
-				.map( d => `https://archive.org/download/${d.identifier}/${d.identifier}.mp4` )
+			const json  = await r.json()
+			const pages = Object.values( json?.query?.pages || {} )
+			this._skyVideos = pages
+				.map( p => p?.videoinfo?.[ 0 ]?.url )
+				.filter( Boolean )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
@@ -135,12 +137,14 @@ class ButterflyBlobsScene {
 	async _fetchTornadoVideos() {
 		try {
 			const r = await fetch(
-				'https://archive.org/advancedsearch.php?q=subject%3Atornad+mediatype%3Amovies&fl=identifier&rows=30&output=json',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Videos_of_tornadoes&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
-			const { response } = await r.json()
-			this._tornadoVideos = ( response?.docs || [] )
-				.map( d => `https://archive.org/download/${d.identifier}/${d.identifier}.mp4` )
+			const json  = await r.json()
+			const pages = Object.values( json?.query?.pages || {} )
+			this._tornadoVideos = pages
+				.map( p => p?.videoinfo?.[ 0 ]?.url )
+				.filter( Boolean )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
@@ -177,7 +181,7 @@ class ButterflyBlobsScene {
 		if ( stage.mode === 'mono'  ) { this.params.contraste = 14; this.params.flou = 8 }
 		if ( stage.mode === 'chaos' ) { this.params.contraste = 1;  this.params.flou = 0 }
 
-		this.wrap.style.opacity = String( stage.wrapOpacity )
+		this.wrap.style.mixBlendMode = stage.blendMode
 
 		// fallback color index before potentially playing video (in case video fails)
 		if      ( stage.bgType === 'white'   ) this._bg.colorIdx = 1
@@ -238,7 +242,8 @@ class ButterflyBlobsScene {
 		this.wrap = document.createElement( 'div' )
 		this.wrap.style.cssText = 'position:fixed;inset:0;overflow:hidden;z-index:1;'
 		document.body.appendChild( this.wrap )
-		this.wrap.style.opacity = String( TRACK[ 0 ].wrapOpacity )
+		document.body.style.isolation = 'isolate'
+		this.wrap.style.mixBlendMode = TRACK[ 0 ].blendMode
 
 		this.canvas = document.createElement( 'canvas' )
 		this.wrap.appendChild( this.canvas )
