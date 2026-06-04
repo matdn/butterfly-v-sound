@@ -87,7 +87,7 @@ export default class PanelManager {
 
 		// Slider scene duration
 		this.dom.durationSlider.addEventListener( 'input', ( e ) => {
-			const val = parseInt( e.target.value, 10 )
+			const val = parseInt( e.target.value, 3 )
 			this.vjHost.sceneSeconds = val
 			this.dom.durationVal.textContent = `${ val }s`
 		} )
