@@ -246,6 +246,9 @@ class ButterflyBlobsScene {
 
 		this._resize()
 		addEventListener( 'resize', () => this._resize() )
+		addEventListener( 'keydown', ( e ) => {
+			if ( e.key === 'ArrowRight' ) this._advanceStage()
+		} )
 
 		this._updateFilter()
 		this._reSample()
@@ -510,7 +513,7 @@ class ButterflyBlobsScene {
 		const a = this.audio
 
 		// ── track stage advancement — count significant kicks ────────────────
-		if ( a.kick > 0.65 && this.t - this._lastKickTime > 20 ) {
+		if ( a.kick > 0.4 && this.t - this._lastKickTime > 10 ) {
 			this._lastKickTime = this.t
 			this._kickCount++
 			const stage = TRACK[ this._trackStage ]
