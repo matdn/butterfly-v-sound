@@ -28,9 +28,10 @@ class ButterflyBlobsScene {
 		this.t     = 0
 
 		// canvas / DOM
-		this.canvas = null
-		this.ctx    = null
-		this.wrap   = null
+		this.canvas    = null
+		this.ctx       = null
+		this.wrap      = null
+		this.blendWrap = null
 
 		// track / stage state
 		this._trackStage    = 0
@@ -122,14 +123,19 @@ class ButterflyBlobsScene {
 	async _fetchSkyVideos() {
 		try {
 			const r = await fetch(
-				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Time-lapse_videos_of_clouds&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url&format=json&origin=*',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Time-lapse_videos_of_clouds&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url|derivatives&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
 			const json  = await r.json()
 			const pages = Object.values( json?.query?.pages || {} )
 			this._skyVideos = pages
-				.map( p => p?.videoinfo?.[ 0 ]?.url )
-				.filter( Boolean )
+				.flatMap( p => {
+					const vi   = p?.videoinfo?.[ 0 ]
+					const mp4  = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/mp4'  ) )?.src
+					const webm = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/webm' ) )?.src
+					const url  = mp4 ?? webm ?? ( /\.(webm|mp4)$/i.test( vi?.url ?? '' ) ? vi?.url : null )
+					return url ? [ url ] : []
+				} )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
@@ -137,14 +143,19 @@ class ButterflyBlobsScene {
 	async _fetchTornadoVideos() {
 		try {
 			const r = await fetch(
-				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Videos_of_tornadoes&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url&format=json&origin=*',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Videos_of_tornadoes&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url|derivatives&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
 			const json  = await r.json()
 			const pages = Object.values( json?.query?.pages || {} )
 			this._tornadoVideos = pages
-				.map( p => p?.videoinfo?.[ 0 ]?.url )
-				.filter( Boolean )
+				.flatMap( p => {
+					const vi   = p?.videoinfo?.[ 0 ]
+					const mp4  = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/mp4'  ) )?.src
+					const webm = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/webm' ) )?.src
+					const url  = mp4 ?? webm ?? ( /\.(webm|mp4)$/i.test( vi?.url ?? '' ) ? vi?.url : null )
+					return url ? [ url ] : []
+				} )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
@@ -181,7 +192,7 @@ class ButterflyBlobsScene {
 		if ( stage.mode === 'mono'  ) { this.params.contraste = 14; this.params.flou = 8 }
 		if ( stage.mode === 'chaos' ) { this.params.contraste = 1;  this.params.flou = 0 }
 
-		this.wrap.style.mixBlendMode = stage.blendMode
+		this.blendWrap.style.mixBlendMode = stage.blendMode
 
 		// fallback color index before potentially playing video (in case video fails)
 		if      ( stage.bgType === 'white'   ) this._bg.colorIdx = 1
@@ -238,12 +249,16 @@ class ButterflyBlobsScene {
 		this.bgEl.appendChild( videoEl )
 		this._bg.videoEl = videoEl
 
-		// wrapper div receives the CSS blur+contrast metaball filter
+		// blendWrap: handles mix-blend-mode only (no filter — combining filter+blend on same element breaks compositing)
+		this.blendWrap = document.createElement( 'div' )
+		this.blendWrap.style.cssText = 'position:fixed;inset:0;z-index:1;'
+		this.blendWrap.style.mixBlendMode = TRACK[ 0 ].blendMode
+		document.body.appendChild( this.blendWrap )
+
+		// wrap: receives the CSS blur+contrast metaball filter
 		this.wrap = document.createElement( 'div' )
-		this.wrap.style.cssText = 'position:fixed;inset:0;overflow:hidden;z-index:1;'
-		document.body.appendChild( this.wrap )
-		document.body.style.isolation = 'isolate'
-		this.wrap.style.mixBlendMode = TRACK[ 0 ].blendMode
+		this.wrap.style.cssText = 'position:absolute;inset:0;overflow:hidden;'
+		this.blendWrap.appendChild( this.wrap )
 
 		this.canvas = document.createElement( 'canvas' )
 		this.wrap.appendChild( this.canvas )
