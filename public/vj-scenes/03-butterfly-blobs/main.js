@@ -1,4 +1,5 @@
 import Analyzer from '/sounds/Analyzer.js'
+import * as THREE from 'three'
 
 const PALETTE = [
 	'#E9D3FB', '#BEB8EA', '#BAC2D7', '#B09C69',
@@ -9,7 +10,7 @@ const PALETTE = [
 ]
 
 const MODES = [ 'mono', /*'couleur',*/ 'réseau', 'chaos' ]
-const BACKGROUND_COLORS = [ '#06060a00', '#f0ede400', '#061a0a', '#160824' ]   // noir, crème, vert, violet
+const BACKGROUND_COLORS = [ '#06060a', '#06060a', '#061a0a', '#160824' ]   // noir, noir, vert, violet
 
 // Scripted track — stages advance when kick count reaches kicksToNext
 const TRACK = [
@@ -28,17 +29,17 @@ class ButterflyBlobsScene {
 		this.t     = 0
 
 		// canvas / DOM
-		this.canvas    = null
-		this.ctx       = null
-		this.wrap      = null
-		this.blendWrap = null
+		this.canvas = null
+		this.ctx    = null
+		this.wrap   = null
+		this._three = null   // Three.js background renderer
 
 		// track / stage state
 		this._trackStage    = 0
 		this._kickCount     = 0
 		this._lastKickTime  = -999   // cooldown between counted kicks
-		this._skyVideos     = []
-		this._tornadoVideos = []
+		this._skyImages     = []
+		this._tornadoImages = []
 
 		// visual params (editable - no GUI in VJ mode)
 		this.params = {
@@ -79,8 +80,7 @@ class ButterflyBlobsScene {
 
 		// Background state
 		this._bg = {
-			colorIdx: 1,   // start on crème (#f0ede4) for the intro blanc stage
-			videoEl:  null,
+			colorIdx: 1,   // index dans BACKGROUND_COLORS (le canvas crème couvre le bg en stage blanc)
 		}
 	}
 
@@ -88,8 +88,8 @@ class ButterflyBlobsScene {
 
 	async load() {
 		this._fetchArtworkPool()    // fire-and-forget; fills butterfly image pool
-		this._fetchSkyVideos()      // fire-and-forget; ciel stage background
-		this._fetchTornadoVideos()  // fire-and-forget; tornado stage background
+		this._fetchSkyImages()      // fire-and-forget; ciel stage background
+		this._fetchTornadoImages()  // fire-and-forget; tornado stage background
 		return new Promise( ( resolve ) => {
 			const img = new Image()
 			img.crossOrigin = 'anonymous'
@@ -120,65 +120,85 @@ class ButterflyBlobsScene {
 		} catch { /* offline or timeout */ }
 	}
 
-	async _fetchSkyVideos() {
+	async _fetchSkyImages() {
 		try {
 			const r = await fetch(
-				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Time-lapse_videos_of_clouds&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url|derivatives&format=json&origin=*',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Photographs_of_clouds&gcmlimit=40&gcmtype=file&prop=imageinfo&iiprop=url&iiurlwidth=1920&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
 			const json  = await r.json()
 			const pages = Object.values( json?.query?.pages || {} )
-			this._skyVideos = pages
+			this._skyImages = pages
 				.flatMap( p => {
-					const vi   = p?.videoinfo?.[ 0 ]
-					const mp4  = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/mp4'  ) )?.src
-					const webm = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/webm' ) )?.src
-					const url  = mp4 ?? webm ?? ( /\.(webm|mp4)$/i.test( vi?.url ?? '' ) ? vi?.url : null )
-					return url ? [ url ] : []
+					const ii  = p?.imageinfo?.[ 0 ]
+					const url = ii?.thumburl ?? ii?.url
+					return url && /\.(jpg|jpeg|png|webp)/i.test( url ) ? [ url ] : []
 				} )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
 
-	async _fetchTornadoVideos() {
+	async _fetchTornadoImages() {
 		try {
 			const r = await fetch(
-				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Videos_of_tornadoes&gcmlimit=30&gcmtype=file&prop=videoinfo&viiprop=url|derivatives&format=json&origin=*',
+				'https://commons.wikimedia.org/w/api.php?action=query&generator=categorymembers&gcmtitle=Category:Photographs_of_tornadoes&gcmlimit=40&gcmtype=file&prop=imageinfo&iiprop=url&iiurlwidth=1920&format=json&origin=*',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
 			const json  = await r.json()
 			const pages = Object.values( json?.query?.pages || {} )
-			this._tornadoVideos = pages
+			this._tornadoImages = pages
 				.flatMap( p => {
-					const vi   = p?.videoinfo?.[ 0 ]
-					const mp4  = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/mp4'  ) )?.src
-					const webm = vi?.derivatives?.find( d => d?.type?.startsWith( 'video/webm' ) )?.src
-					const url  = mp4 ?? webm ?? ( /\.(webm|mp4)$/i.test( vi?.url ?? '' ) ? vi?.url : null )
-					return url ? [ url ] : []
+					const ii  = p?.imageinfo?.[ 0 ]
+					const url = ii?.thumburl ?? ii?.url
+					return url && /\.(jpg|jpeg|png|webp)/i.test( url ) ? [ url ] : []
 				} )
 				.sort( () => Math.random() - 0.5 )
 		} catch { /* offline */ }
 	}
 
-	_playVideoFromPool( urls ) {
+	_loadImageFromPool( urls ) {
 		if ( ! urls.length ) { this._switchToColor(); return }
-		const url     = urls[ Math.floor( Math.random() * urls.length ) ]
-		const videoEl = this._bg.videoEl
-		videoEl.onerror       = () => this._switchToColor()
-		videoEl.src           = url
-		videoEl.style.display = 'block'
-		videoEl.play().catch( () => this._switchToColor() )
-		this.bgEl.style.background = 'none'
+		const url = urls[ Math.floor( Math.random() * urls.length ) ]
+		new THREE.TextureLoader().load(
+			url,
+			( tex ) => {
+				tex.colorSpace = THREE.SRGBColorSpace
+				// cover UV — calculé une fois à la fin du chargement
+				const img       = tex.image
+				const vpAspect  = innerWidth / innerHeight
+				const imgAspect = img.naturalWidth / img.naturalHeight
+				if ( vpAspect > imgAspect ) {
+					tex.repeat.set( 1, imgAspect / vpAspect )
+					tex.offset.set( 0, ( 1 - imgAspect / vpAspect ) / 2 )
+				} else {
+					tex.repeat.set( vpAspect / imgAspect, 1 )
+					tex.offset.set( ( 1 - vpAspect / imgAspect ) / 2, 0 )
+				}
+				if ( this._three.imageTexture ) this._three.imageTexture.dispose()
+				this._three.imageTexture      = tex
+				this._three.material.map      = tex
+				this._three.material.color.set( 0xffffff )
+				this._three.material.needsUpdate = true
+			},
+			undefined,
+			() => this._switchToColor(),
+		)
 	}
 
 	_switchToColor() {
-		const bg = this._bg
-		if ( bg.videoEl ) { bg.videoEl.style.display = 'none'; bg.videoEl.src = '' }
-		this.bgEl.style.background = BACKGROUND_COLORS[ bg.colorIdx ]
+		const { material } = this._three
+		if ( this._three.imageTexture ) {
+			this._three.imageTexture.dispose()
+			this._three.imageTexture = null
+		}
+		material.map = null
+		material.color.setStyle( BACKGROUND_COLORS[ this._bg.colorIdx ] )
+		material.needsUpdate = true
 	}
 
 	_applyBgColor() {
-		this.bgEl.style.background = BACKGROUND_COLORS[ this._bg.colorIdx ]
+		if ( ! this._three ) return
+		this._switchToColor()
 	}
 
 	_advanceStage() {
@@ -192,16 +212,14 @@ class ButterflyBlobsScene {
 		if ( stage.mode === 'mono'  ) { this.params.contraste = 14; this.params.flou = 8 }
 		if ( stage.mode === 'chaos' ) { this.params.contraste = 1;  this.params.flou = 0 }
 
-		this.blendWrap.style.mixBlendMode = stage.blendMode
-
 		// fallback color index before potentially playing video (in case video fails)
 		if      ( stage.bgType === 'white'   ) this._bg.colorIdx = 1
 		else if ( stage.bgType === 'sky'     ) this._bg.colorIdx = 1
 		else if ( stage.bgType === 'tornado' ) this._bg.colorIdx = 0
 		else if ( stage.bgType === 'color'   ) this._bg.colorIdx = stage.heavy ? 3 : 0
 
-		if      ( stage.bgType === 'sky'     ) this._playVideoFromPool( this._skyVideos )
-		else if ( stage.bgType === 'tornado' ) this._playVideoFromPool( this._tornadoVideos )
+		if      ( stage.bgType === 'sky'     ) this._loadImageFromPool( this._skyImages )
+		else if ( stage.bgType === 'tornado' ) this._loadImageFromPool( this._tornadoImages )
 		else                                    this._switchToColor()
 
 		if ( stage.heavy ) this._lorenz.maxTrail = 30000
@@ -234,31 +252,27 @@ class ButterflyBlobsScene {
 	}
 
 	init() {
-		// background layer — behind the CSS-filter wrap; visible through transparent canvas
-		this.bgEl = document.createElement( 'div' )
-		this.bgEl.style.cssText = 'position:fixed;inset:0;z-index:0;'
-		document.body.appendChild( this.bgEl )
+		// ── Three.js background — video plane ou couleur unie ─────────────────
+		const renderer = new THREE.WebGLRenderer( { antialias: false } )
+		renderer.setPixelRatio( 1 )
+		renderer.setSize( innerWidth, innerHeight )
+		renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:0;display:block;'
+		document.body.appendChild( renderer.domElement )
+
+		const scene    = new THREE.Scene()
+		const camera   = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 )
+		const geo      = new THREE.PlaneGeometry( 2, 2 )
+		const material = new THREE.MeshBasicMaterial( { color: 0x06060a } )
+		const mesh     = new THREE.Mesh( geo, material )
+		scene.add( mesh )
+
+		this._three = { renderer, scene, camera, mesh, material, imageTexture: null }
 		this._applyBgColor()
 
-		const videoEl = document.createElement( 'video' )
-		videoEl.autoplay = true
-		videoEl.loop     = true
-		videoEl.muted    = true
-		videoEl.setAttribute( 'playsinline', '' )
-		videoEl.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none;'
-		this.bgEl.appendChild( videoEl )
-		this._bg.videoEl = videoEl
-
-		// blendWrap: handles mix-blend-mode only (no filter — combining filter+blend on same element breaks compositing)
-		this.blendWrap = document.createElement( 'div' )
-		this.blendWrap.style.cssText = 'position:fixed;inset:0;z-index:1;'
-		this.blendWrap.style.mixBlendMode = TRACK[ 0 ].blendMode
-		document.body.appendChild( this.blendWrap )
-
-		// wrap: receives the CSS blur+contrast metaball filter
+		// ── Canvas 2-D pour le rendu metaball (par-dessus le bg Three.js) ─────
 		this.wrap = document.createElement( 'div' )
-		this.wrap.style.cssText = 'position:absolute;inset:0;overflow:hidden;'
-		this.blendWrap.appendChild( this.wrap )
+		this.wrap.style.cssText = 'position:fixed;inset:0;z-index:1;overflow:hidden;'
+		document.body.appendChild( this.wrap )
 
 		this.canvas = document.createElement( 'canvas' )
 		this.wrap.appendChild( this.canvas )
@@ -296,6 +310,7 @@ class ButterflyBlobsScene {
 		this.canvas.width  = innerWidth  * dpr
 		this.canvas.height = innerHeight * dpr
 		this.canvas.style.cssText = `display:block;width:${innerWidth}px;height:${innerHeight}px;`
+		if ( this._three ) this._three.renderer.setSize( innerWidth, innerHeight )
 	}
 
 	_updateFilter( dynContraste ) {
@@ -303,6 +318,12 @@ class ButterflyBlobsScene {
 		this.wrap.style.filter = ( mode === 'réseau' || mode === 'chaos' )
 			? 'none'
 			: `blur(${flou}px) contrast(${dynContraste ?? contraste})`
+	}
+
+	_renderThreeBg() {
+		const t = this._three
+		if ( ! t ) return
+		t.renderer.render( t.scene, t.camera )
 	}
 
 	_reSample() {
@@ -574,8 +595,14 @@ class ButterflyBlobsScene {
 		} else {
 			// mode mono: dark blobs on white → CSS blur+contrast makes crisp metaballs
 			// mode couleur: colored blobs on dark → blur merges neighbouring colors
-			ctx.fillStyle = params.mode === 'couleur' ? '#0f0f14' : '#f4f4f0'
-			ctx.fillRect( 0, 0, canvas.width, canvas.height )
+			// stages vidéo (sky/tornado): clearRect pour laisser le plan Three.js transparaître
+			const bgType = TRACK[ this._trackStage ]?.bgType
+			if ( bgType === 'sky' || bgType === 'tornado' ) {
+				ctx.clearRect( 0, 0, canvas.width, canvas.height )
+			} else {
+				ctx.fillStyle = params.mode === 'couleur' ? '#0f0f14' : '#f4f4f0'
+				ctx.fillRect( 0, 0, canvas.width, canvas.height )
+			}
 
 			if ( blobs.length ) {
 				const scale = Math.min( canvas.width * 0.85 / this.imgW, canvas.height * 0.85 / this.imgH )
@@ -602,6 +629,7 @@ class ButterflyBlobsScene {
 			}
 		}
 
+		this._renderThreeBg()
 		this.t += 0.16
 	}
 
