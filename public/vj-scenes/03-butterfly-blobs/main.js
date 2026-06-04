@@ -11,6 +11,15 @@ const PALETTE = [
 const MODES = [ 'mono', /*'couleur',*/ 'réseau', 'chaos' ]
 const BACKGROUND_COLORS = [ '#06060a', '#f0ede4', '#061a0a', '#160824' ]   // noir, crème, vert, violet
 
+// Scripted track — stages advance when kick count reaches kicksToNext
+const TRACK = [
+	{ mode: 'mono',  bgType: 'white',   wrapOpacity: 1.0, kicksToNext: 10 },   // 0 – intro blanc
+	{ mode: 'mono',  bgType: 'sky',     wrapOpacity: 0.7, kicksToNext: 10 },   // 1 – ciel
+	{ mode: 'chaos', bgType: 'color',   wrapOpacity: 1.0, kicksToNext: 12 },   // 2 – chaos
+	{ mode: 'mono',  bgType: 'tornado', wrapOpacity: 0.7, kicksToNext: 10 },   // 3 – tornade
+	{ mode: 'chaos', bgType: 'color',   wrapOpacity: 1.0, heavy: true  },      // 4 – chaos final
+]
+
 class ButterflyBlobsScene {
 
 	constructor( audio ) {
@@ -23,8 +32,12 @@ class ButterflyBlobsScene {
 		this.ctx    = null
 		this.wrap   = null
 
-		// auto mode switch state
-		this._lastModeSwitch = -999   // t-units; large negative → first kick triggers immediately
+		// track / stage state
+		this._trackStage    = 0
+		this._kickCount     = 0
+		this._lastKickTime  = -999   // cooldown between counted kicks
+		this._skyVideos     = []
+		this._tornadoVideos = []
 
 		// visual params (editable - no GUI in VJ mode)
 		this.params = {
@@ -35,7 +48,7 @@ class ButterflyBlobsScene {
 			flou:      8,
 			contraste: 14,
 			seuil:     0.25,
-			mode:      'couleur',  // 'mono' | 'couleur' | 'réseau'
+			mode:      'mono',     // initial stage: mono blanc
 			variation: 0.5,
 		}
 
@@ -63,22 +76,19 @@ class ButterflyBlobsScene {
 			lastPop: -999,
 		}
 
-		// Background cycling state — color ↔ video, independent of mode
+		// Background state
 		this._bg = {
-			colorIdx:   0,
-			videoUrls:  [],
-			videoIdx:   0,
-			videoEl:    null,
-			lastSwitch: -999,
-			_count:     0,
+			colorIdx: 1,   // start on crème (#f0ede4) for the intro blanc stage
+			videoEl:  null,
 		}
 	}
 
 	// ── Lifecycle ──────────────────────────────────────────────────────────────
 
 	async load() {
-		this._fetchArtworkPool()   // fire-and-forget; fills image pool for chaos mode
-		this._fetchVideoBg()       // fire-and-forget; fills video pool for background
+		this._fetchArtworkPool()    // fire-and-forget; fills butterfly image pool
+		this._fetchSkyVideos()      // fire-and-forget; ciel stage background
+		this._fetchTornadoVideos()  // fire-and-forget; tornado stage background
 		return new Promise( ( resolve ) => {
 			const img = new Image()
 			img.crossOrigin = 'anonymous'
@@ -100,62 +110,87 @@ class ButterflyBlobsScene {
 
 	async _fetchArtworkPool() {
 		try {
-			const r        = await fetch( 'https://api.artic.edu/api/v1/artworks?fields=id,image_id&limit=100&is_public_domain=true', { signal: AbortSignal.timeout( 8000 ) } )
+			const r        = await fetch( 'https://api.artic.edu/api/v1/artworks/search?q=butterfly&fields=id,image_id&limit=100', { signal: AbortSignal.timeout( 8000 ) } )
 			const { data } = await r.json()
 			this._chaosWall.pool = data
 				.filter( d => d.image_id )
 				.map( d => `https://www.artic.edu/iiif/2/${d.image_id}/full/400,/0/default.jpg` )
-				.sort( () => Math.random() - 0.5 )   // shuffle for variety
-		} catch { /* offline or timeout — no images, just the Lorenz drawing */ }
+				.sort( () => Math.random() - 0.5 )
+		} catch { /* offline or timeout */ }
 	}
 
-	async _fetchVideoBg() {
+	async _fetchSkyVideos() {
 		try {
-			const tags = [
-				'subject%3Abirds',
-				'subject%3Asky+subject%3Aclouds',
-				'subject%3Anature+subject%3Alandscape',
-				'collection%3Aprelinger+mediatype%3Amovies',
-				'subject%3Acity+subject%3Aarchive',
-			]
-			const q = tags[ Math.floor( Math.random() * tags.length ) ]
 			const r = await fetch(
-				`https://archive.org/advancedsearch.php?q=${q}&fl=identifier&rows=40&output=json`,
+				'https://archive.org/advancedsearch.php?q=subject%3Asky+subject%3Aclouds+mediatype%3Amovies&fl=identifier&rows=30&output=json',
 				{ signal: AbortSignal.timeout( 8000 ) },
 			)
 			const { response } = await r.json()
-			this._bg.videoUrls = ( response?.docs || [] )
+			this._skyVideos = ( response?.docs || [] )
 				.map( d => `https://archive.org/download/${d.identifier}/${d.identifier}.mp4` )
 				.sort( () => Math.random() - 0.5 )
-		} catch { /* offline — background stays color-only */ }
+		} catch { /* offline */ }
 	}
 
-	_switchBg() {
-		const bg = this._bg
-		bg._count++
-		if ( bg._count % 2 === 0 && bg.videoUrls.length ) {
-			// switch to video — if it fails, fall back to color
-			const url = bg.videoUrls[ bg.videoIdx % bg.videoUrls.length ]
-			bg.videoIdx++
-			bg.videoEl.onerror          = () => this._switchToColor()
-			bg.videoEl.src              = url
-			bg.videoEl.style.display    = 'block'
-			bg.videoEl.play().catch( () => this._switchToColor() )
-			this.bgEl.style.background  = 'none'
-		} else {
-			this._switchToColor()
-		}
+	async _fetchTornadoVideos() {
+		try {
+			const r = await fetch(
+				'https://archive.org/advancedsearch.php?q=subject%3Atornad+mediatype%3Amovies&fl=identifier&rows=30&output=json',
+				{ signal: AbortSignal.timeout( 8000 ) },
+			)
+			const { response } = await r.json()
+			this._tornadoVideos = ( response?.docs || [] )
+				.map( d => `https://archive.org/download/${d.identifier}/${d.identifier}.mp4` )
+				.sort( () => Math.random() - 0.5 )
+		} catch { /* offline */ }
+	}
+
+	_playVideoFromPool( urls ) {
+		if ( ! urls.length ) { this._switchToColor(); return }
+		const url     = urls[ Math.floor( Math.random() * urls.length ) ]
+		const videoEl = this._bg.videoEl
+		videoEl.onerror       = () => this._switchToColor()
+		videoEl.src           = url
+		videoEl.style.display = 'block'
+		videoEl.play().catch( () => this._switchToColor() )
+		this.bgEl.style.background = 'none'
 	}
 
 	_switchToColor() {
 		const bg = this._bg
-		bg.colorIdx = ( bg.colorIdx + 1 ) % BACKGROUND_COLORS.length
 		if ( bg.videoEl ) { bg.videoEl.style.display = 'none'; bg.videoEl.src = '' }
 		this.bgEl.style.background = BACKGROUND_COLORS[ bg.colorIdx ]
 	}
 
 	_applyBgColor() {
 		this.bgEl.style.background = BACKGROUND_COLORS[ this._bg.colorIdx ]
+	}
+
+	_advanceStage() {
+		const next = this._trackStage + 1
+		if ( next >= TRACK.length ) return
+		this._trackStage = next
+		this._kickCount  = 0
+		const stage      = TRACK[ this._trackStage ]
+		this.params.mode = stage.mode
+
+		if ( stage.mode === 'mono'  ) { this.params.contraste = 14; this.params.flou = 8 }
+		if ( stage.mode === 'chaos' ) { this.params.contraste = 1;  this.params.flou = 0 }
+
+		this.wrap.style.opacity = String( stage.wrapOpacity )
+
+		// fallback color index before potentially playing video (in case video fails)
+		if      ( stage.bgType === 'white'   ) this._bg.colorIdx = 1
+		else if ( stage.bgType === 'sky'     ) this._bg.colorIdx = 1
+		else if ( stage.bgType === 'tornado' ) this._bg.colorIdx = 0
+		else if ( stage.bgType === 'color'   ) this._bg.colorIdx = stage.heavy ? 3 : 0
+
+		if      ( stage.bgType === 'sky'     ) this._playVideoFromPool( this._skyVideos )
+		else if ( stage.bgType === 'tornado' ) this._playVideoFromPool( this._tornadoVideos )
+		else                                    this._switchToColor()
+
+		if ( stage.heavy ) this._lorenz.maxTrail = 30000
+		if ( stage.mode !== 'chaos' ) this._initBlobs()
 	}
 
 	_popImage() {
@@ -166,8 +201,9 @@ class ButterflyBlobsScene {
 		const img = new Image()
 		img.crossOrigin = 'anonymous'
 		img.onload = () => {
-			const aspect = img.naturalWidth / ( img.naturalHeight || 1 )
-			const w = 50 + Math.random() * 70
+			const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
+			const aspect  = img.naturalWidth / ( img.naturalHeight || 1 )
+			const w = isHeavy ? ( 120 + Math.random() * 120 ) : ( 50 + Math.random() * 70 )
 			const h = w / aspect
 			wall.active.push( {
 				img,
@@ -177,7 +213,7 @@ class ButterflyBlobsScene {
 				rot: 0,
 				t0:  this.t,
 			} )
-			if ( wall.active.length > 400 ) wall.active.shift()
+			if ( wall.active.length > ( isHeavy ? 800 : 400 ) ) wall.active.shift()
 		}
 		img.src = url
 	}
@@ -202,6 +238,7 @@ class ButterflyBlobsScene {
 		this.wrap = document.createElement( 'div' )
 		this.wrap.style.cssText = 'position:fixed;inset:0;overflow:hidden;z-index:1;'
 		document.body.appendChild( this.wrap )
+		this.wrap.style.opacity = String( TRACK[ 0 ].wrapOpacity )
 
 		this.canvas = document.createElement( 'canvas' )
 		this.wrap.appendChild( this.canvas )
@@ -395,10 +432,11 @@ class ButterflyBlobsScene {
 
 	_drawChaos( dynVitesse, kickMult, freqs ) {
 		const { canvas, ctx } = this
-		const a    = this.audio
-		const l    = this._lorenz
-		const wall = this._chaosWall
-		const dpr  = Math.min( devicePixelRatio, 2 )
+		const a       = this.audio
+		const l       = this._lorenz
+		const wall    = this._chaosWall
+		const dpr     = Math.min( devicePixelRatio, 2 )
+		const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
 
 		// clear canvas every frame — bgEl (color or video) shows through
 		ctx.clearRect( 0, 0, canvas.width, canvas.height )
@@ -428,11 +466,11 @@ class ButterflyBlobsScene {
 				const i1  = Math.floor( ( b + 1 ) / BUCKETS * n )
 				if ( i1 <= i0 ) continue
 				const age   = ( b + 1 ) / BUCKETS
-				const alpha = age * age * 0.82
+				const alpha = isHeavy ? Math.min( 1, age * age * 1.6 ) : age * age * 0.82
 				const hue   = 28 + age * 28 + ( freqs[ Math.floor( age * 40 ) ] || 0 ) * 18
 				ctx.beginPath()
 				ctx.strokeStyle = `hsla(${hue.toFixed( 0 )}, 85%, ${( 38 + age * 26 ).toFixed( 0 )}%, ${alpha.toFixed( 3 )})`
-				ctx.lineWidth   = 0.4 + age * 1.8 * kickMult
+				ctx.lineWidth   = isHeavy ? ( 1.5 + age * 7 * kickMult ) : ( 0.4 + age * 1.8 * kickMult )
 				ctx.moveTo( trail[ i0 ][ 0 ], trail[ i0 ][ 1 ] )
 				for ( let i = i0 + 1; i < i1; i++ ) ctx.lineTo( trail[ i ][ 0 ], trail[ i ][ 1 ] )
 				ctx.stroke()
@@ -440,9 +478,11 @@ class ButterflyBlobsScene {
 		}
 
 		// ── Pop image sur chaque kick ─────────────────────────────────────────
-		if ( a.kick > 0.3 && this.t - wall.lastPop > 1.5 ) {
+		if ( a.kick > 0.3 && this.t - wall.lastPop > ( isHeavy ? 0.4 : 1.5 ) ) {
 			wall.lastPop = this.t
-			const burst = a.kickHard > 0.35 ? 4 : 2
+			const burst = isHeavy
+				? ( a.kickHard > 0.35 ? 14 : 8 )
+				: ( a.kickHard > 0.35 ? 4  : 2 )
 			for ( let i = 0; i < burst; i++ ) this._popImage()
 		}
 
@@ -469,22 +509,14 @@ class ButterflyBlobsScene {
 		const { canvas, ctx, params, blobs } = this
 		const a = this.audio
 
-		// ── background switch on kickHard (independent cooldown ~2 s) ─────────
-		if ( a.kickHard > 0.5 && this.t - this._bg.lastSwitch > 20 ) {
-			this._bg.lastSwitch = this.t
-			this._switchBg()
-		}
-
-		// ── auto mode switch on kick (cooldown ~4 s = 38 t-units) ───────────
-		if ( a.kick > 0.65 && this.t - this._lastModeSwitch > 38 ) {
-			this._lastModeSwitch = this.t
-			const next = ( MODES.indexOf( params.mode ) + 1 ) % MODES.length
-			params.mode = MODES[ next ]
-			if ( params.mode === 'mono' )    { params.contraste = 14;  params.flou = 8 }
-			if ( params.mode === 'couleur' ) { params.contraste = 2.5; params.flou = 8 }
-			if ( params.mode === 'réseau' )  { params.contraste = 1;   params.flou = 0 }
-			if ( params.mode === 'chaos' )   { params.contraste = 1;   params.flou = 0 }
-			if ( params.mode !== 'chaos' ) this._initBlobs()
+		// ── track stage advancement — count significant kicks ────────────────
+		if ( a.kick > 0.65 && this.t - this._lastKickTime > 20 ) {
+			this._lastKickTime = this.t
+			this._kickCount++
+			const stage = TRACK[ this._trackStage ]
+			if ( stage.kicksToNext && this._kickCount >= stage.kicksToNext ) {
+				this._advanceStage()
+			}
 		}
 
 		// ── sound-driven modulation ──────────────────────────────────────────
