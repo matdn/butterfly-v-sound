@@ -1,24 +1,41 @@
 import Analyzer from '/sounds/Analyzer.js'
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { RGBShiftShader } from 'three/examples/jsm/shaders/RGBShiftShader.js'
 
-// ── Wriggle shader — butterfly PNG avec displacement GLSL réactif au beat ────
 const WRIGGLE_VERT = `
 uniform float uTime;
 uniform float uKick;
 uniform float uVolume;
+uniform float uFlapBoost;
 varying vec2 vUv;
 void main() {
 	vUv = uv;
 	vec3 p = position;
 	float wing = smoothstep( 0.15, 1.0, abs( uv.x - 0.5 ) * 2.0 );
+	float spine = 1.0 - wing;
+	float side = sign( uv.x - 0.5 );
 	float kickSoft = smoothstep( 0.0, 1.0, uKick );
 	float beat = 0.65 + kickSoft * 0.45 + uVolume * 0.30;
 	float flapPhase = 0.5 + 0.5 * sin( uTime * 0.78 );
 	float flapCurve = flapPhase * flapPhase * ( 3.0 - 2.0 * flapPhase );
-	float flap = ( flapCurve * 2.0 - 1.0 ) * beat;
+	float flap = ( flapCurve * 2.0 - 1.0 ) * beat * uFlapBoost;
+	float yAmp = 0.040 + kickSoft * 0.075 + uVolume * 0.040;
+	float phaseSkew = side * ( 0.75 + sin( uTime * 0.31 ) * 0.45 ) + ( uv.y - 0.5 ) * 1.9;
+	float yWaveA = sin( uv.x * 7.8 + uTime * ( 1.22 + side * 0.33 ) + phaseSkew );
+	float yWaveB = cos( uv.y * 8.1 - uTime * ( 1.83 - side * 0.27 ) - phaseSkew * 0.7 );
+	float yWaveC = sin( ( uv.x + uv.y ) * 4.7 + uTime * 0.97 + side * 1.3 );
+	float yWave = yWaveA * yWaveB + yWaveC * 0.55;
+	float breathe = 1.0 + sin( uTime * ( 0.52 + side * 0.10 ) + uv.x * 1.7 ) * ( 0.020 + kickSoft * 0.028 + uVolume * 0.014 );
 	// Wing tips go far on Z, and fold slightly toward center.
-	p.z += sign( uv.x - 0.5 ) * wing * flap * 0.95;
+	p.z += side * wing * flap * 0.95;
 	p.x *= 1.0 - wing * abs( flap ) * 0.36;
+	// Vertical deformation: intentionally desynced and asymmetric.
+	p.y += yWave * yAmp * ( 0.38 + wing * 0.70 ) + sin( uTime * 2.21 - uv.y * 4.9 + side * 0.9 ) * spine * ( 0.020 + kickSoft * 0.028 );
+	p.y *= breathe;
 	gl_Position = projectionMatrix * modelViewMatrix * vec4( p, 1.0 );
 }`
 
@@ -27,6 +44,7 @@ uniform sampler2D uTex;
 uniform float     uTime;
 uniform float     uKick;
 uniform float     uVolume;
+uniform float     uTransparent;
 varying vec2 vUv;
 void main() {
 	vec4 base = texture2D( uTex, vUv );
@@ -49,7 +67,13 @@ void main() {
 	float alpha = smoothstep( 0.05, 0.95, mixTex.a + field * wobble );
 	vec3 bg  = vec3( 0.957, 0.957, 0.941 );
 	vec3 fg  = vec3( 0.110, 0.110, 0.133 );
-	gl_FragColor = vec4( mix( bg, fg, alpha ), 1.0 );
+	vec3 outColor = mix( bg, fg, alpha );
+	float outAlpha = 1.0;
+	if ( uTransparent > 0.5 ) {
+		outColor = fg;
+		outAlpha = alpha;
+	}
+	gl_FragColor = vec4( outColor, outAlpha );
 }`
 
 const PALETTE = [
@@ -62,6 +86,7 @@ const PALETTE = [
 
 const MODES = [ 'mono', /*'couleur',*/ 'réseau', 'chaos' ]
 const BACKGROUND_COLORS = [ '#06060a', '#06060a', '#061a0a', '#160824' ]   // noir, noir, vert, violet
+const BUTTERFLY_SHARED_SCALE = 0.56
 
 const LOCAL_BUTTERFLY_POOL = [
 	'/images butterfly /1-214-768x607.jpg',
@@ -84,32 +109,15 @@ const LOCAL_BUTTERFLY_POOL = [
 	'/images butterfly /steve mccurry.jpeg',
 	'/images butterfly /Tibet.jpeg',
 	'/images butterfly /Valentina Tereshkova.jpeg',
-	// '/images butterfly /(1).jpeg',
-	// '/images butterfly /(2).jpeg',
-	// '/images butterfly /(3).jpeg',
-	// '/images butterfly /(4).jpeg',
-	// '/images butterfly /(5).jpeg',
-	// '/images butterfly /(6).jpeg',
-	// '/images butterfly /(7).jpeg',
-	// '/images butterfly /(8).jpeg',
-	// '/images butterfly /(9).jpeg',
-	// '/images butterfly /(10).jpeg',
-	// '/images butterfly /(11).jpeg',
-	// '/images butterfly /(12).jpeg',
-	// '/images butterfly /(13).jpeg',
-	// '/images butterfly /(14).jpeg',
-	// '/images butterfly /(15).jpeg',
-	// '/images butterfly /(16).jpeg',
-
 ]
 
 // Scripted track — stages advance when kick count reaches kicksToNext
 const TRACK = [
-	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 5 },                    // 0 – intro blanc
-	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 7 },                    // 1 – ciel (3 mots + buffer)
-	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal',   kicksToNext: 6 },                    // 2 – réseau
-	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 10, textAfterKick: 5 },  // 3 – tornade (2×) : papillon puis texte
-	{ mode: 'chaos',  bgType: 'color',  blendMode: 'normal',  heavy: true },                         // 4 – chaos final maxi
+	{ mode: 'mono',  bgType: 'white',   blendMode: 'normal',   kicksToNext: 3 },                     // 0 – intro blanc (raccourci)
+	{ mode: 'mono',  bgType: 'sky',     blendMode: 'multiply', kicksToNext: 4 },                     // 1 – ciel (raccourci)
+	{ mode: 'réseau', bgType: 'color',  blendMode: 'normal',   kicksToNext: 4 },                     // 2 – réseau (raccourci)
+	{ mode: 'mono',  bgType: 'tornado', blendMode: 'multiply', kicksToNext: 6, textAfterKick: 3 },  // 3 – tornade (plus court)
+	{ mode: 'chaos',  bgType: 'color',  blendMode: 'normal',  heavy: true, kicksToNext: 6 },        // 4 – chaos puis boucle
 ]
 
 class ButterflyBlobsScene {
@@ -119,13 +127,11 @@ class ButterflyBlobsScene {
 		this._raf  = null
 		this.t     = 0
 
-		// canvas / DOM
 		this.canvas = null
 		this.ctx    = null
 		this.wrap   = null
 		this._three = null   // Three.js background renderer
 
-		// track / stage state
 		this._trackStage      = 0
 		this._kickCount       = 0
 		this._lastKickTime    = -999   // cooldown between counted kicks
@@ -134,7 +140,6 @@ class ButterflyBlobsScene {
 		this._scribble        = { x: 0, y: 0, angle: 0, angVel: 0 }  // gribouillis mode heavy
 
 
-		// visual params (editable - no GUI in VJ mode)
 	this.params = {
 			blobs:     350,
 			taille:    1,
@@ -143,7 +148,7 @@ class ButterflyBlobsScene {
 			flou:      0,
 			contraste: 14,
 			seuil:     0.05,
-			mode:      'mono',     // initial stage: mono blanc
+			mode:      'mono',    
 			variation: 0.1,
 		}
 
@@ -167,9 +172,13 @@ class ButterflyBlobsScene {
 		// Image wall state — persists across mode switches
 		this._chaosWall = {
 			pool:    [],
+			cache:   new Map(),
 			poolIdx: 0,
 			active:  [],
 			lastPop: -999,
+			lastKickEdge: -999,
+			prevKick: 0,
+			nextRevealAt: 0,
 		}
 
 		// Background state
@@ -182,9 +191,12 @@ class ButterflyBlobsScene {
 
 	async load() {
 		try {
-			const font = new FontFace( 'HelveticaNow', 'url(/HelveticaNowDisplay-Bold.woff2)' )
-			await font.load()
-			document.fonts.add( font )
+			const fonts = [
+				new FontFace( 'HelveticaNow', 'url(/HelveticaNowDisplay-Bold.woff2)' ),
+				new FontFace( 'HelveticaNowLight', 'url(/HelveticaNowDisplay-Light.woff2)' ),
+			]
+			const loaded = await Promise.all( fonts.map( ( f ) => f.load() ) )
+			for ( const f of loaded ) document.fonts.add( f )
 		} catch { /* fallback si le fichier est absent */ }
 		this._fetchArtworkPool()    // fire-and-forget; fills butterfly image pool
 		return new Promise( ( resolve ) => {
@@ -208,9 +220,18 @@ class ButterflyBlobsScene {
 	}
 
 	async _fetchArtworkPool() {
-		this._chaosWall.pool = LOCAL_BUTTERFLY_POOL
+		const wall = this._chaosWall
+		wall.pool = LOCAL_BUTTERFLY_POOL
 			.map( ( p ) => encodeURI( p ) )
 			.sort( () => Math.random() - 0.5 )
+
+		for ( const url of wall.pool ) {
+			if ( wall.cache.has( url ) ) continue
+			const img = new Image()
+			img.crossOrigin = 'anonymous'
+			img.onload = () => wall.cache.set( url, img )
+			img.src = url
+		}
 	}
 
 	_loadImageFromPool( urls, fit = 'cover' ) {
@@ -229,10 +250,10 @@ class ButterflyBlobsScene {
 					tex.offset.set( 0, 0 )
 					const scaleX = vpAspect > imgAspect ? imgAspect / vpAspect : 1
 					const scaleY = vpAspect > imgAspect ? 1 : vpAspect / imgAspect
-					const containZoom = 1.012
+					const containZoom = BUTTERFLY_SHARED_SCALE
 					this._three.mesh.scale.set( scaleX * containZoom, scaleY * containZoom, 1 )
 					// fond blanc hors image (multiply : blanc × canvas = canvas passe à travers)
-					this._three.scene.background = new THREE.Color( 0xffffff )
+					this._three.scene.background = new THREE.Color( 0xE8E8E8 )
 				} else {
 					// cover UV — l'image remplit tout le viewport, recadrée si nécessaire
 					if ( vpAspect > imgAspect ) {
@@ -249,7 +270,7 @@ class ButterflyBlobsScene {
 				this._three.imageTexture      = tex
 				this._three.mesh.material     = this._three.material   // sort du mode wriggle si actif
 				this._three.material.map      = tex
-				this._three.material.color.set( 0xffffff )
+				this._three.material.color.set( 0xE8E8E8 )
 				this._three.material.needsUpdate = true
 			},
 			undefined,
@@ -260,6 +281,7 @@ class ButterflyBlobsScene {
 	_playVideo( url ) {
 		const { video, material } = this._three
 		this._three.mesh.material = material   // sort du mode wriggle si actif
+		if ( this._three.overlayMesh ) this._three.overlayMesh.visible = false
 		video.src = url
 		video.play().catch( () => this._switchToColor() )
 		if ( this._three.videoTexture ) this._three.videoTexture.dispose()
@@ -267,13 +289,14 @@ class ButterflyBlobsScene {
 		tex.colorSpace = THREE.SRGBColorSpace
 		this._three.videoTexture = tex
 		material.map = tex
-		material.color.set( 0xffffff )
+		material.color.set( 0xE8E8E8 )
 		material.needsUpdate = true
 	}
 
 	_switchToColor() {
 		const { video, material, mesh } = this._three
 		mesh.material = material   // sort du mode wriggle si actif
+		if ( this._three.overlayMesh ) this._three.overlayMesh.visible = false
 		video.pause()
 		video.src = ''
 		if ( this._three.videoTexture ) {
@@ -304,19 +327,37 @@ class ButterflyBlobsScene {
 		const vpAspect  = innerWidth / innerHeight
 		const fitX      = vpAspect > imgAspect ? imgAspect / vpAspect : 1
 		const fitY      = vpAspect > imgAspect ? 1 : vpAspect / imgAspect
-		const shrink    = 0.462
+		const shrink    = 0.40
 		three.mesh.scale.set( fitX * shrink, fitY * shrink, 1 )
 		three.scene.background = new THREE.Color( 0xf4f4f0 )
 		three.mesh.material = three.wriggleMaterial
+		if ( three.overlayMesh ) three.overlayMesh.visible = false
+	}
+
+	_activateTornadoWriggleOverlay( kick = 0, volume = 0 ) {
+		const three = this._three
+		if ( ! three?.overlayMesh || ! three?.wriggleMaterial?.uniforms.uTex.value ) return
+		const imgAspect = this.imgW / ( this.imgH || 1 )
+		const vpAspect  = innerWidth / innerHeight
+		const fitX      = vpAspect > imgAspect ? imgAspect / vpAspect : 1
+		const fitY      = vpAspect > imgAspect ? 1 : vpAspect / imgAspect
+		const pulse = 1 + kick * 0.03 + volume * 0.015
+		three.overlayMesh.scale.set( fitX * BUTTERFLY_SHARED_SCALE * pulse, fitY * BUTTERFLY_SHARED_SCALE * pulse, 1 )
+		three.overlayMesh.visible = true
 	}
 
 	_advanceStage() {
-		const next = this._trackStage + 1
-		if ( next >= TRACK.length ) return
+		const next = ( this._trackStage + 1 ) % TRACK.length
 		this._trackStage     = next
 		this._kickCount      = 0
+		this._lastKickTime   = -999
 		this._skyWordIdx     = 0
 		this._tornadoWordIdx = 0
+		this._chaosWall.active = []
+		if ( this._three?.overlayMesh ) this._three.overlayMesh.visible = false
+		this._chaosWall.prevKick = 0
+		this._chaosWall.lastKickEdge = -999
+		this._chaosWall.nextRevealAt = this.t
 		const stage      = TRACK[ this._trackStage ]
 		this.params.mode = stage.mode
 
@@ -349,37 +390,64 @@ class ButterflyBlobsScene {
 		else if ( stage.bgType === 'color'   ) this._bg.colorIdx = 0
 
 		if      ( stage.bgType === 'white'   ) this._activateWriggle()
-		else if ( stage.bgType === 'sky'     ) this._loadImageFromPool( [ '/girlButterfly.png' ], 'contain' )
-		else if ( stage.bgType === 'tornado' ) this._playVideo( '/tornado.mp4' )
+		else if ( stage.bgType === 'sky'     ) this._loadImageFromPool( [ '/girlButterfly.png' ], 'cover' )
+		else if ( stage.bgType === 'tornado' ) this._playVideo( '/tornados.mp4' )
 		else                                    this._switchToColor()
 
 		if ( stage.heavy ) this._lorenz.maxTrail = 30000
 		if ( stage.mode !== 'chaos' ) this._initBlobs()
 	}
 
-	_popImage() {
+	_pushWallImage( img, revealAt ) {
+		const wall = this._chaosWall
+		const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
+		const aspect  = img.naturalWidth / ( img.naturalHeight || 1 )
+		const w = isHeavy ? ( 55 + Math.random() * 55 ) : ( 22 + Math.random() * 28 )
+		const h = w / aspect
+		wall.active.push( {
+			img,
+			x:   Math.random() * innerWidth,
+			y:   Math.random() * innerHeight,
+			w, h,
+			rot: 0,
+			t0:  revealAt,
+			revealed: false,
+		} )
+		if ( wall.active.length > ( isHeavy ? 800 : 400 ) ) wall.active.shift()
+	}
+
+	_popImage( revealGap = 0.55 ) {
 		const wall = this._chaosWall
 		if ( ! wall.pool.length ) return
+		const revealAt = Math.max( this.t, wall.nextRevealAt )
+		wall.nextRevealAt = revealAt + revealGap
 		const url = wall.pool[ wall.poolIdx % wall.pool.length ]
 		wall.poolIdx++
+		const cached = wall.cache.get( url )
+		if ( cached?.naturalWidth ) {
+			this._pushWallImage( cached, revealAt )
+			return
+		}
 		const img = new Image()
 		img.crossOrigin = 'anonymous'
 		img.onload = () => {
-			const isHeavy = TRACK[ this._trackStage ]?.heavy ?? false
-			const aspect  = img.naturalWidth / ( img.naturalHeight || 1 )
-			const w = isHeavy ? ( 55 + Math.random() * 55 ) : ( 22 + Math.random() * 28 )
-			const h = w / aspect
-			wall.active.push( {
-				img,
-				x:   Math.random() * innerWidth,
-				y:   Math.random() * innerHeight,
-				w, h,
-				rot: 0,
-				t0:  this.t,
-			} )
-			if ( wall.active.length > ( isHeavy ? 800 : 400 ) ) wall.active.shift()
+			wall.cache.set( url, img )
+			this._pushWallImage( img, revealAt )
 		}
 		img.src = url
+	}
+
+	_tryPopImageOnKick( threshold, edgeReset, kickGap, revealGap, burstCount = 1, burstGap = revealGap ) {
+		const wall = this._chaosWall
+		const kick = this.audio.kick
+		const risingEdge = kick > threshold && wall.prevKick <= edgeReset
+		if ( risingEdge && this.t - wall.lastKickEdge > kickGap ) {
+			wall.lastKickEdge = this.t
+			for ( let i = 0; i < burstCount; i++ ) {
+				this._popImage( i === 0 ? revealGap : burstGap )
+			}
+		}
+		wall.prevKick = kick
 	}
 
 	init() {
@@ -402,7 +470,28 @@ class ButterflyBlobsScene {
 		video.muted  = true
 		video.setAttribute( 'playsinline', '' )
 
-		this._three = { renderer, scene, camera, mesh, material, imageTexture: null, video, videoTexture: null }
+		const composer = new EffectComposer( renderer )
+		const renderPass = new RenderPass( scene, camera )
+		const bloomPass = new UnrealBloomPass( new THREE.Vector2( innerWidth, innerHeight ), 0.42, 0.55, 0.62 )
+		const rgbShiftPass = new ShaderPass( RGBShiftShader )
+		rgbShiftPass.uniforms.amount.value = 0.0008
+		composer.addPass( renderPass )
+		composer.addPass( bloomPass )
+		composer.addPass( rgbShiftPass )
+
+		this._three = {
+			renderer,
+			scene,
+			camera,
+			mesh,
+			material,
+			imageTexture: null,
+			video,
+			videoTexture: null,
+			composer,
+			bloomPass,
+			rgbShiftPass,
+		}
 
 		// ── Wriggle ShaderMaterial — butterfly PNG + displacement GLSL ───────────────
 		const wriggleMat = new THREE.ShaderMaterial( {
@@ -411,9 +500,12 @@ class ButterflyBlobsScene {
 				uTime:   { value: 0 },
 				uKick:   { value: 0 },
 				uVolume: { value: 0 },
+				uFlapBoost: { value: 1.0 },
+				uTransparent: { value: 0.0 },
 			},
 			vertexShader:   WRIGGLE_VERT,
 			fragmentShader: WRIGGLE_FRAG,
+			transparent: true,
 		} )
 		if ( this._vectorImg ) {
 			const wTex = new THREE.Texture( this._vectorImg )
@@ -423,6 +515,11 @@ class ButterflyBlobsScene {
 			this._three.wriggleTex = wTex
 		}
 		this._three.wriggleMaterial = wriggleMat
+		const overlayMesh = new THREE.Mesh( new THREE.PlaneGeometry( 2, 2, 120, 80 ), wriggleMat )
+		overlayMesh.visible = false
+		overlayMesh.renderOrder = 2
+		scene.add( overlayMesh )
+		this._three.overlayMesh = overlayMesh
 
 		this._applyBgColor()
 		if ( TRACK[ this._trackStage ]?.bgType === 'white' ) this._activateWriggle()
@@ -469,8 +566,13 @@ class ButterflyBlobsScene {
 		this.canvas.width  = ( innerWidth  + bleed * 2 ) * dpr
 		this.canvas.height = ( innerHeight + bleed * 2 ) * dpr
 		this.canvas.style.cssText = `display:block;position:absolute;left:${-bleed}px;top:${-bleed}px;width:${innerWidth + bleed * 2}px;height:${innerHeight + bleed * 2}px;`
-		if ( this._three ) this._three.renderer.setSize( innerWidth, innerHeight )
+		if ( this._three ) {
+			this._three.renderer.setSize( innerWidth, innerHeight )
+			this._three.composer?.setSize( innerWidth, innerHeight )
+			this._three.bloomPass?.setSize( innerWidth, innerHeight )
+		}
 		if ( this._three?.mesh?.material === this._three?.wriggleMaterial ) this._activateWriggle()
+		if ( this._three?.overlayMesh?.visible ) this._activateTornadoWriggleOverlay( this.audio?.kick ?? 0, this.audio?.volumeSmooth ?? 0 )
 	}
 
 	_updateFilter( dynContraste ) {
@@ -515,7 +617,28 @@ class ButterflyBlobsScene {
 		const t = this._three
 		if ( ! t ) return
 		if ( t.videoTexture ) t.videoTexture.needsUpdate = true
-		t.renderer.render( t.scene, t.camera )
+
+		const bgType = TRACK[ this._trackStage ]?.bgType
+		const isButterflyWriggle = this.params.mode === 'mono' && bgType === 'white' && t.mesh.material === t.wriggleMaterial
+		const isTornadoWriggle = bgType === 'tornado' && this._tornadoWordIdx === 0 && t.overlayMesh?.visible
+		const useButterflyFx = isButterflyWriggle || isTornadoWriggle
+
+		if ( t.bloomPass ) {
+			t.bloomPass.enabled = useButterflyFx
+			if ( useButterflyFx ) {
+				t.bloomPass.strength = 0.26 + this.audio.kick * 0.70 + this.audio.volumeSmooth * 0.22
+				t.bloomPass.radius = 0.45 + this.audio.volumeSmooth * 0.20
+				t.bloomPass.threshold = 0.62 - this.audio.volumeSmooth * 0.18
+			}
+		}
+		if ( t.rgbShiftPass ) {
+			t.rgbShiftPass.enabled = useButterflyFx
+			if ( useButterflyFx ) {
+				t.rgbShiftPass.uniforms.amount.value = 0.00055 + this.audio.kick * 0.0016 + this.audio.volumeSmooth * 0.0007
+			}
+		}
+
+		t.composer?.render()
 	}
 
 	_reSample() {
@@ -604,7 +727,7 @@ class ButterflyBlobsScene {
 		const dynCount  = Math.round( blobs.length * ( 1 - params.variation * 0.4 * ( wave2 * 0.5 + 0.5 ) ) )
 		const active    = blobs.filter( b => b.darkness >= dynDisplaySeuil ).slice( 0, dynCount )
 
-		const scale     = Math.min( canvas.width * 0.85 / this.imgW, canvas.height * 0.85 / this.imgH )
+		const scale     = Math.min( canvas.width * BUTTERFLY_SHARED_SCALE / this.imgW, canvas.height * BUTTERFLY_SHARED_SCALE / this.imgH )
 		const ox        = ( canvas.width  - this.imgW * scale ) / 2
 		const oy        = ( canvas.height - this.imgH * scale ) / 2
 		const minDist   = Math.min( canvas.width, canvas.height ) * 0.02
@@ -666,26 +789,26 @@ class ButterflyBlobsScene {
 		}
 
 		// ── Pop image sur chaque kick ─────────────────────────────────────────
-		const a    = this.audio
 		const wall = this._chaosWall
 		const dpr  = Math.min( devicePixelRatio, 2 )
-		if ( a.kick > 0.3 && this.t - wall.lastPop > 1.5 ) {
-			wall.lastPop = this.t
-			const burst = a.kickHard > 0.35 ? 4 : 2
-			for ( let i = 0; i < burst; i++ ) this._popImage()
-		}
+		this._tryPopImageOnKick( 0.16, 0.11, 1.0, 0.002, 80, 0.001 )
 
 		// ── Mur d'images par dessus le réseau ────────────────────────────────
+		let revealsThisFrame = 0
+		const maxRevealsPerFrame = 1
 		for ( const im of wall.active ) {
-			const progress = Math.min( 1, ( this.t - im.t0 ) / 8 )
-			const ease     = 1 - Math.pow( 1 - progress, 3 )
+			if ( ! im.revealed ) {
+				if ( this.t < im.t0 || revealsThisFrame >= maxRevealsPerFrame ) continue
+				im.revealed = true
+				revealsThisFrame++
+			}
 			const w      = im.w * dpr
 			const h      = im.h * dpr
 			ctx.save()
-			ctx.globalAlpha = ease
+			ctx.globalAlpha = 1
 			ctx.translate( im.x * dpr, im.y * dpr )
 			ctx.rotate( im.rot )
-			ctx.scale( 0.4 + 0.6 * ease, 0.4 + 0.6 * ease )
+			ctx.scale( 1, 1 )
 			ctx.drawImage( im.img, -w / 2, -h / 2, w, h )
 			ctx.restore()
 		}
@@ -770,7 +893,8 @@ class ButterflyBlobsScene {
 	_drawIntroText() {
 		const { canvas, ctx } = this
 		const lines = [
-			'THE BUTTERFLY EFFECT:',
+
+			'* THE BUTTERFLY EFFECT:',
 			'THE SENSITIVE DEPENDENCE',
 			'ON INITIAL CONDITIONS',
 			'IN WHICH A SMALL',
@@ -783,25 +907,58 @@ class ButterflyBlobsScene {
 		ctx.save()
 		ctx.textAlign    = 'left'
 		ctx.textBaseline = 'alphabetic'
-		ctx.fillStyle    = 'rgba(0, 0, 0, 0.07)'
+		const introColor = 'rgba(0, 0, 0, 0.07)'
+		const starColor  = 'rgba(220, 36, 36, 0.90)'
+		ctx.fillStyle    = introColor
 
-		let size = Math.round( canvas.height * 0.095 )
-		ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+		let size = Math.round( canvas.height * 0.112 )
+		ctx.font = `${size}px 'HelveticaNowLight', 'Helvetica Neue', Helvetica, Arial, sans-serif`
 		let maxW = 0
 		for ( const line of lines ) maxW = Math.max( maxW, ctx.measureText( line ).width )
 		const targetW = canvas.width * 0.92
 		if ( maxW > targetW ) {
 			const ratio = targetW / maxW
 			size = Math.round( size * ratio )
-			ctx.font = `${size}px 'HelveticaNow', Helvetica, Arial, sans-serif`
+			ctx.font = `${size}px 'HelveticaNowLight', 'Helvetica Neue', Helvetica, Arial, sans-serif`
 		}
 
-		const lineGap = size * 0.18
+		const drawJustifiedLine = ( line, x, y, width ) => {
+			const words = line.trim().split( /\s+/ ).filter( Boolean )
+			if ( words.length > 1 ) {
+				const wordsW = words.reduce( ( sum, w ) => sum + ctx.measureText( w ).width, 0 )
+				const gap = ( width - wordsW ) / ( words.length - 1 )
+				let cx = x
+				for ( let i = 0; i < words.length; i++ ) {
+					ctx.fillStyle = words[ i ].includes( '*' ) ? starColor : introColor
+					ctx.fillText( words[ i ], cx, y )
+					cx += ctx.measureText( words[ i ] ).width + gap
+				}
+				ctx.fillStyle = introColor
+				return
+			}
+
+			const chars = [ ...line ]
+			if ( chars.length <= 1 ) {
+				ctx.fillText( line, x, y )
+				return
+			}
+			const charsW = chars.reduce( ( sum, ch ) => sum + ctx.measureText( ch ).width, 0 )
+			const gap = ( width - charsW ) / ( chars.length - 1 )
+			let cx = x
+			for ( const ch of chars ) {
+				ctx.fillStyle = ch === '*' ? starColor : introColor
+				ctx.fillText( ch, cx, y )
+				cx += ctx.measureText( ch ).width + gap
+			}
+			ctx.fillStyle = introColor
+		}
+
+		const lineGap = size * 0.07
 		const blockH  = lines.length * ( size + lineGap )
 		let y = ( canvas.height - blockH ) * 0.52 + size
-		const x = canvas.width * 0.08
+		const x = canvas.width * 0.04
 		for ( const line of lines ) {
-			ctx.fillText( line, x, y )
+			drawJustifiedLine( line, x, y, targetW )
 			y += size + lineGap
 		}
 		ctx.restore()
@@ -891,25 +1048,24 @@ class ButterflyBlobsScene {
 		}
 
 		// ── Pop image sur chaque kick ─────────────────────────────────────────
-		if ( a.kick > 0.3 && this.t - wall.lastPop > ( isHeavy ? 2 : 4 ) ) {
-			wall.lastPop = this.t
-			const burst = isHeavy
-				? ( a.kickHard > 0.35 ? 14 : 8 )
-				: ( a.kickHard > 0.35 ? 4  : 2 )
-			for ( let i = 0; i < burst; i++ ) this._popImage()
-		}
+		this._tryPopImageOnKick( 0.16, 0.11, isHeavy ? 0.8 : 1.0, isHeavy ? 0.0015 : 0.002, isHeavy ? 120 : 80, isHeavy ? 0.001 : 0.001 )
 
 		// ── Mur d'images par dessus le tracé ─────────────────────────────────
+		let revealsThisFrame = 0
+		const maxRevealsPerFrame = 1
 		for ( const im of wall.active ) {
-			const progress = Math.min( 1, ( this.t - im.t0 ) / 8 )
-			const ease     = 1 - Math.pow( 1 - progress, 3 )   // ease-out cubique
+			if ( ! im.revealed ) {
+				if ( this.t < im.t0 || revealsThisFrame >= maxRevealsPerFrame ) continue
+				im.revealed = true
+				revealsThisFrame++
+			}
 			const w = im.w * dpr
 			const h = im.h * dpr
 			ctx.save()
-			ctx.globalAlpha = ease
+			ctx.globalAlpha = 1
 			ctx.translate( im.x * dpr, im.y * dpr )
 			ctx.rotate( im.rot )
-			ctx.scale( 0.4 + 0.6 * ease, 0.4 + 0.6 * ease )
+			ctx.scale( 1, 1 )
 			ctx.drawImage( im.img, -w / 2, -h / 2, w, h )
 			ctx.restore()
 		}
@@ -918,11 +1074,13 @@ class ButterflyBlobsScene {
 	_draw() {
 		const { canvas, ctx, params, blobs } = this
 		const a = this.audio
+		const bgType = TRACK[ this._trackStage ]?.bgType
+		const minKickGap = bgType === 'sky' ? 3.2 : 10
+		const minKickVal = bgType === 'sky' ? 0.26 : 0.4
 
 		// ── track stage advancement — count significant kicks ────────────────
-		if ( a.kick > 0.4 && this.t - this._lastKickTime > 10 ) {
+		if ( a.kick > minKickVal && this.t - this._lastKickTime > minKickGap ) {
 			this._lastKickTime = this.t
-			const bgType = TRACK[ this._trackStage ]?.bgType
 			// sky : chaque kick révèle le mot suivant
 			if ( bgType === 'sky' ) {
 				this._skyWordIdx = Math.min( this._skyWordIdx + 1, 3 )
@@ -930,7 +1088,7 @@ class ButterflyBlobsScene {
 			// tornado : après textAfterKick kicks, révèle les mots de la 2e phase
 			if ( bgType === 'tornado' ) {
 				const { textAfterKick } = TRACK[ this._trackStage ]
-				if ( textAfterKick && this._kickCount >= textAfterKick ) {
+				if ( textAfterKick && this._kickCount + 1 >= textAfterKick ) {
 					this._tornadoWordIdx = Math.min( this._tornadoWordIdx + 1, 2 )
 				}
 			}
@@ -951,19 +1109,14 @@ class ButterflyBlobsScene {
 		// Per-frequency bin values for per-blob reactivity
 		const freqs       = a.volumeByFrequency
 
-		// ── dynamic contraste: pulse sur kick, respire avec le volume ─────────
 		const dynContraste = params.mode === 'mono'
 			? params.contraste + a.volumeSmooth * 6 + a.kick * 5
 			: params.mode === 'couleur'
 				? params.contraste + a.volumeSmooth * 1.5 + a.kick * 1.2
 				: params.contraste
 
-		// ── dynamic display seuil: fort volume = tout le papillon visible ─────
-		// Quiet (vol≈0): only dark blobs (body/veins) shown
-		// Loud  (vol≈1): all sampled blobs shown (wing tips too)
 		const dynDisplaySeuil = params.seuil + ( 1 - a.volumeSmooth ) * 0.45
 
-		// update CSS filter every frame
 		this._updateFilter( dynContraste )
 
 		if ( params.mode === 'chaos' ) {
@@ -971,29 +1124,22 @@ class ButterflyBlobsScene {
 		} else if ( params.mode === 'réseau' ) {
 			this._drawReseau( dynVitesse, kickMult, freqs, dynDisplaySeuil )
 		} else {
-			// mode mono : PNG wriggle ou texte selon le stage
 			const bgType = TRACK[ this._trackStage ]?.bgType
 			if ( bgType === 'sky' ) {
 				this._drawSkyText()
 			} else if ( bgType === 'tornado' && this._tornadoWordIdx > 0 ) {
+				if ( this._three?.overlayMesh ) this._three.overlayMesh.visible = false
 				this._drawTornadoText()
 			} else if ( bgType === 'tornado' ) {
 				ctx.clearRect( 0, 0, canvas.width, canvas.height )
-				if ( this._vectorImg ) {
-					const pulse = 1 + a.kick * 0.05 + a.volumeSmooth * 0.03
-					const scale = Math.min( canvas.width * 0.70 / this.imgW, canvas.height * 0.70 / this.imgH ) * pulse
-					const drawW = this.imgW * scale
-					const drawH = this.imgH * scale
-					const x = ( canvas.width - drawW ) / 2
-					const y = ( canvas.height - drawH ) / 2
-					ctx.save()
-					ctx.globalAlpha = 0.98
-					ctx.drawImage( this._vectorImg, x, y, drawW, drawH )
-					// In difference mode, a dark source can vanish; force a white silhouette with original alpha.
-					ctx.globalCompositeOperation = 'source-in'
-					ctx.fillStyle = '#ffffff'
-					ctx.fillRect( x, y, drawW, drawH )
-					ctx.restore()
+				this._activateTornadoWriggleOverlay( a.kick, a.volumeSmooth )
+				const m = this._three?.wriggleMaterial
+				if ( m ) {
+					m.uniforms.uTime.value   = this.t
+					m.uniforms.uKick.value   = a.kick
+					m.uniforms.uVolume.value = a.volumeSmooth
+					m.uniforms.uFlapBoost.value = 1.15
+					m.uniforms.uTransparent.value = 1.0
 				}
 			} else {
 				ctx.clearRect( 0, 0, canvas.width, canvas.height )
@@ -1003,6 +1149,8 @@ class ButterflyBlobsScene {
 					m.uniforms.uTime.value   = this.t
 					m.uniforms.uKick.value   = a.kick
 					m.uniforms.uVolume.value = a.volumeSmooth
+					m.uniforms.uFlapBoost.value = 1.0
+					m.uniforms.uTransparent.value = 0.0
 				}
 				if ( bgType === 'white' && this._trackStage === 0 ) this._drawIntroText()
 			}
